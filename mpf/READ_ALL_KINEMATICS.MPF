@@ -9,26 +9,38 @@
 ;   type-specific reader program.  It also writes a master summary file
 ;   listing all configured transformations.
 ;
-;   Transformation type codes (MD24100 TRAFO_TYPE_1):
-;     0   – No transformation
-;    16   – TRANSMIT  (polar, turning+milling)
-;    24   – TRAORI    head-head 5-axis
-;    32   – TRACYL    (cylinder surface)
-;    40   – TRAORI    table-table 5-axis
-;    56   – TRAORI    head+table (mixed) 5-axis
-;    64   – TRAANG    (inclined axis)
+;   Transformation type codes (MD24100 $MC_TRAFO_TYPE_1) — from reference
+;   manual 840Dsl_md_para_lists_man_1219_en-US:
 ;
-;   The program will call sub-programs:
+;     0          – No transformation configured
+;     16  – 31   – TRAORI  5-axis, turnable TOOL side (head-head)
+;                  Low 4 bits = axis sequence:
+;                    0=AB, 1=AC, 2=BA, 3=BC, 4=CA, 5=CB
+;                  Example: 20 = 16+4 = head-head CA sequence
+;     32  – 47   – TRAORI  5-axis, turnable WORKPIECE side (table-table)
+;     48  – 63   – TRAORI  5-axis, MIXED (one axis tool, one workpiece)
+;     72          – TRAORI  5-axis, generic (kinematic data from TCARR)
+;     256 – 271  – TRANSMIT (polar transformation, Y-axis replacement)
+;     512 – 527  – TRACYL   (cylinder surface unrolling)
+;     1024–1039  – TRAANG   (inclined-axis transformation)
+;     2048        – TRACLG   (centerless transformation)
+;     4096 – 4098 – OEM transformation
+;     8192+       – TRACON   (cascaded transformations)
+;
+;   Slot machine data:
+;     MD24100  $MC_TRAFO_TYPE_1   – slot 1
+;     MD24200  $MC_TRAFO_TYPE_2   – slot 2
+;     MD24300  $MC_TRAFO_TYPE_3   – slot 3
+;     MD24400  $MC_TRAFO_TYPE_4   – slot 4
+;
+;   The program calls sub-programs:
 ;     01_TRAORI/READ_TRAORI_KINEMATICS.MPF
 ;     02_TRANSMIT/READ_TRANSMIT_KINEMATICS.MPF
 ;     03_TRACYL/READ_TRACYL_KINEMATICS.MPF
 ;     04_TRAANG/READ_TRAANG_KINEMATICS.MPF
 ;     05_GENERIC_KINCHAIN/READ_GENERIC_KINCHAIN.MPF
 ;
-;   If the Generic Kinematic Chain (GKC) option is not installed, the GKC
-;   reader is skipped (checked via $NK_NUM_ELEMENTS).
-;
-; PLATFORM:    Siemens SINUMERIK 840D sl / SINUMERIK ONE  (FW >= 4.5)
+; PLATFORM:    Siemens SINUMERIK 840D sl / SINUMERIK ONE
 ; LANGUAGE:    SINUMERIK NC High-Level Language (HLL)
 ; OUTPUT FILE: /user/sinumerik/hmi/log/all_kinematics_summary.txt
 ;
@@ -41,6 +53,7 @@
 ;
 ; REVISION HISTORY:
 ;   2024-01-01  Initial version
+;   2024-06-01  Corrected TRAFO_TYPE codes from reference manual
 ; ============================================================================
 
 ; --- Working variables -------------------------------------------------------
@@ -52,6 +65,16 @@ DEF BOOL        _gkcAvailable     ; TRUE if GKC option variables are accessible
 DEF STRING[120] _line             ; formatted output line
 DEF STRING[80]  _tDesc            ; textual transformation description
 
+; --- Booleans tracking which readers must be called -------------------------
+DEF BOOL        _needTraori
+DEF BOOL        _needTransmit
+DEF BOOL        _needTracyl
+DEF BOOL        _needTraang
+_needTraori   = FALSE
+_needTransmit = FALSE
+_needTracyl   = FALSE
+_needTraang   = FALSE
+
 ; --- Output file path --------------------------------------------------------
 DEF STRING[120] _summaryFile
 _summaryFile = "/user/sinumerik/hmi/log/all_kinematics_summary.txt"
@@ -60,7 +83,7 @@ _summaryFile = "/user/sinumerik/hmi/log/all_kinematics_summary.txt"
 ; Main program body
 ; ============================================================================
 
-_fd = FILEOPEN(_summaryFile, "w")
+_fd = FILEOPEN(_summaryFile, 0)       ; 0 = write / create-or-truncate
 IF _fd < 0
   MSG("ERROR: Cannot create " << _summaryFile)
   M30
@@ -69,6 +92,7 @@ ENDIF
 ; ---- Master header ----------------------------------------------------------
 FILEWRITE(_fd, "============================================================")
 FILEWRITE(_fd, "  SINUMERIK KINEMATICS MASTER SUMMARY")
+FILEWRITE(_fd, "  Reference: 840Dsl_md_para_lists_man_1219_en-US")
 FILEWRITE(_fd, "============================================================")
 FILEWRITE(_fd, "")
 _line = "  NC program   : " << $P_PROG
@@ -76,9 +100,9 @@ FILEWRITE(_fd, _line)
 _line = "  Channel       : " << TOSTRING($AC_CHANNO)
 FILEWRITE(_fd, _line)
 FILEWRITE(_fd, "")
-FILEWRITE(_fd, "  This report scans all 4 transformation slots in this channel")
-FILEWRITE(_fd, "  and lists each configured transformation type.")
-FILEWRITE(_fd, "  Detailed reports are generated in separate files (see below).")
+FILEWRITE(_fd, "  This report scans transformation slots 1-4 in this channel,")
+FILEWRITE(_fd, "  identifies each configured transformation type, and calls")
+FILEWRITE(_fd, "  the appropriate detailed reader program.")
 FILEWRITE(_fd, "")
 FILEWRITE(_fd, "--- TRANSFORMATION SLOT SCAN ---")
 
@@ -86,52 +110,56 @@ _nFound = 0
 
 ; ---- Slot 1 -----------------------------------------------------------------
 _tType = $MC_TRAFO_TYPE_1
-_line = "  Slot 1  (MD24100 TRAFO_TYPE_1) = " << TOSTRING(_tType)
+_line = "  Slot 1  (MD24100  $MC_TRAFO_TYPE_1) = " << TOSTRING(_tType)
 FILEWRITE(_fd, _line)
 IF _tType > 0
   _nFound = _nFound + 1
   GOSUB DECODE_TYPE
   _line = "           => " << _tDesc
   FILEWRITE(_fd, _line)
+  GOSUB SET_FLAGS
 ELSE
   FILEWRITE(_fd, "           => (not configured)")
 ENDIF
 
 ; ---- Slot 2 -----------------------------------------------------------------
 _tType = $MC_TRAFO_TYPE_2
-_line = "  Slot 2  (MD24200 TRAFO_TYPE_2) = " << TOSTRING(_tType)
+_line = "  Slot 2  (MD24200  $MC_TRAFO_TYPE_2) = " << TOSTRING(_tType)
 FILEWRITE(_fd, _line)
 IF _tType > 0
   _nFound = _nFound + 1
   GOSUB DECODE_TYPE
   _line = "           => " << _tDesc
   FILEWRITE(_fd, _line)
+  GOSUB SET_FLAGS
 ELSE
   FILEWRITE(_fd, "           => (not configured)")
 ENDIF
 
 ; ---- Slot 3 -----------------------------------------------------------------
 _tType = $MC_TRAFO_TYPE_3
-_line = "  Slot 3  (MD24300 TRAFO_TYPE_3) = " << TOSTRING(_tType)
+_line = "  Slot 3  (MD24300  $MC_TRAFO_TYPE_3) = " << TOSTRING(_tType)
 FILEWRITE(_fd, _line)
 IF _tType > 0
   _nFound = _nFound + 1
   GOSUB DECODE_TYPE
   _line = "           => " << _tDesc
   FILEWRITE(_fd, _line)
+  GOSUB SET_FLAGS
 ELSE
   FILEWRITE(_fd, "           => (not configured)")
 ENDIF
 
 ; ---- Slot 4 -----------------------------------------------------------------
 _tType = $MC_TRAFO_TYPE_4
-_line = "  Slot 4  (MD24400 TRAFO_TYPE_4) = " << TOSTRING(_tType)
+_line = "  Slot 4  (MD24400  $MC_TRAFO_TYPE_4) = " << TOSTRING(_tType)
 FILEWRITE(_fd, _line)
 IF _tType > 0
   _nFound = _nFound + 1
   GOSUB DECODE_TYPE
   _line = "           => " << _tDesc
   FILEWRITE(_fd, _line)
+  GOSUB SET_FLAGS
 ELSE
   FILEWRITE(_fd, "           => (not configured)")
 ENDIF
@@ -143,14 +171,13 @@ FILEWRITE(_fd, "")
 
 ; ---- GKC availability check ------------------------------------------------
 FILEWRITE(_fd, "--- GENERIC KINEMATIC CHAIN (GKC) AVAILABILITY ---")
-; Try to read the GKC element count; if the variable exists, GKC is available
 _gkcAvailable = FALSE
 IF $NK_NUM_ELEMENTS >= 0
   _gkcAvailable = TRUE
-  _line = "  $NK_NUM_ELEMENTS = " << TOSTRING($NK_NUM_ELEMENTS) << "  => GKC option is ACTIVE"
+  _line = "  $NK_NUM_ELEMENTS = " << TOSTRING($NK_NUM_ELEMENTS) << "  => GKC option ACTIVE"
   FILEWRITE(_fd, _line)
 ELSE
-  FILEWRITE(_fd, "  $NK_NUM_ELEMENTS not accessible => GKC option NOT active or not supported")
+  FILEWRITE(_fd, "  $NK_NUM_ELEMENTS not accessible => GKC option NOT active / not supported")
 ENDIF
 FILEWRITE(_fd, "")
 
@@ -168,25 +195,23 @@ FILEWRITE(_fd, "  Calling individual kinematics readers ...")
 FILEWRITE(_fd, "============================================================")
 FILECLOSE(_fd)
 
-; ---- Call individual readers based on slot 1 type -------------------------
-_tType = $MC_TRAFO_TYPE_1
-
-IF (_tType == 24) OR (_tType == 40) OR (_tType == 56)
+; ---- Call individual readers -----------------------------------------------
+IF _needTraori == TRUE
   MSG("Reading TRAORI kinematics ...")
   EXTCALL "01_TRAORI/READ_TRAORI_KINEMATICS"
 ENDIF
 
-IF _tType == 16
+IF _needTransmit == TRUE
   MSG("Reading TRANSMIT kinematics ...")
   EXTCALL "02_TRANSMIT/READ_TRANSMIT_KINEMATICS"
 ENDIF
 
-IF _tType == 32
+IF _needTracyl == TRUE
   MSG("Reading TRACYL kinematics ...")
   EXTCALL "03_TRACYL/READ_TRACYL_KINEMATICS"
 ENDIF
 
-IF _tType == 64
+IF _needTraang == TRUE
   MSG("Reading TRAANG kinematics ...")
   EXTCALL "04_TRAANG/READ_TRAANG_KINEMATICS"
 ENDIF
@@ -204,32 +229,72 @@ M30
 
 ; ============================================================================
 ; Subroutine DECODE_TYPE
-; Sets _tDesc from _tType
+; Sets _tDesc from _tType using ranges from the reference manual.
+; TRAFO_TYPE_x structure:
+;   bits [3:0]  = sub-variant (axis sequence, pole mode …)
+;   bits [11:4] = transformation group
+; Group base values: 16=TRAORI-head, 32=TRAORI-table, 48=TRAORI-mixed,
+;                    256=TRANSMIT, 512=TRACYL, 1024=TRAANG, 2048=TRACLG
 ; ============================================================================
 DECODE_TYPE:
-IF _tType == 16
-  _tDesc = "TRANSMIT  (polar transformation, turning+milling)"
+IF (_tType >= 16) AND (_tType <= 31)
+  _tDesc = "TRAORI  5-axis HEAD-HEAD (tool-side rotary axes)"
 ENDIF
-IF _tType == 24
-  _tDesc = "TRAORI    (5-axis, HEAD-HEAD: both rotary on tool side)"
+IF (_tType >= 32) AND (_tType <= 47)
+  _tDesc = "TRAORI  5-axis TABLE-TABLE (workpiece-side rotary axes)"
 ENDIF
-IF _tType == 32
+IF (_tType >= 48) AND (_tType <= 63)
+  _tDesc = "TRAORI  5-axis MIXED (head rotary + table rotary)"
+ENDIF
+IF _tType == 72
+  _tDesc = "TRAORI  5-axis GENERIC (kinematic data from TCARR orientable holder)"
+ENDIF
+IF (_tType >= 256) AND (_tType <= 271)
+  _tDesc = "TRANSMIT  (polar transformation, Y-axis replacement on lathe)"
+ENDIF
+IF (_tType >= 512) AND (_tType <= 527)
   _tDesc = "TRACYL    (cylinder surface transformation)"
 ENDIF
-IF _tType == 40
-  _tDesc = "TRAORI    (5-axis, TABLE-TABLE: both rotary on workpiece side)"
-ENDIF
-IF _tType == 56
-  _tDesc = "TRAORI    (5-axis, MIXED: head rotary + table rotary)"
-ENDIF
-IF _tType == 64
+IF (_tType >= 1024) AND (_tType <= 1039)
   _tDesc = "TRAANG    (inclined-axis transformation)"
 ENDIF
-IF (_tType <> 16) AND (_tType <> 24) AND (_tType <> 32) AND (_tType <> 40) AND (_tType <> 56) AND (_tType <> 64)
-  _tDesc = "UNKNOWN transformation type code"
+IF _tType == 2048
+  _tDesc = "TRACLG    (centerless grinding transformation)"
+ENDIF
+IF (_tType >= 4096) AND (_tType <= 4098)
+  _tDesc = "OEM       (OEM-specific transformation)"
+ENDIF
+IF _tType >= 8192
+  _tDesc = "TRACON    (cascaded transformations)"
+ENDIF
+IF (_tType > 0) AND (_tType < 16)
+  _tDesc = "UNKNOWN / reserved transformation type code"
+ENDIF
+RET
+
+; ============================================================================
+; Subroutine SET_FLAGS
+; Sets reader-call booleans based on _tType.
+; ============================================================================
+SET_FLAGS:
+IF (_tType >= 16) AND (_tType <= 63)
+  _needTraori = TRUE
+ENDIF
+IF _tType == 72
+  _needTraori = TRUE
+ENDIF
+IF (_tType >= 256) AND (_tType <= 271)
+  _needTransmit = TRUE
+ENDIF
+IF (_tType >= 512) AND (_tType <= 527)
+  _needTracyl = TRUE
+ENDIF
+IF (_tType >= 1024) AND (_tType <= 1039)
+  _needTraang = TRUE
 ENDIF
 RET
 
 ; ============================================================================
 ; End of READ_ALL_KINEMATICS.MPF
 ; ============================================================================
+

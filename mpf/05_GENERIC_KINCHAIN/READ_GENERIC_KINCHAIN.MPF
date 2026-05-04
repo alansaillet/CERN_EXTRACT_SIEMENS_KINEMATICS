@@ -92,7 +92,7 @@ _outFile = "/user/sinumerik/hmi/log/generic_kinchain.txt"
 ; Main program body
 ; ============================================================================
 
-_fd = FILEOPEN(_outFile, "w")
+_fd = FILEOPEN(_outFile, 0)
 IF _fd < 0
   MSG("ERROR: Cannot create " << _outFile)
   M30

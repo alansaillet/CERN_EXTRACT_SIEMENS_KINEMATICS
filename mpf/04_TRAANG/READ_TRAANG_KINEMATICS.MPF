@@ -26,39 +26,40 @@
 ;
 ;   The inclined axis is typically one of the X, Y, or Z slides.
 ;
-;   Key machine-data parameters (channel MD, read as $MC_xxx):
+;   Key machine-data parameters (channel MD, $MC_xxx), from reference manual
+;   840Dsl_md_para_lists_man_1219_en-US:
 ;   ┌──────────┬──────────────────────────────────┬──────────────────────────┐
-;   │ MD number│ Variable name                    │ Description              │
+;   │ MD number│ Variable name ($MC_)              │ Description              │
 ;   ├──────────┼──────────────────────────────────┼──────────────────────────┤
-;   │ 24100    │ $MC_TRAFO_TYPE_1                  │ = 64 for TRAANG          │
-;   │ 24110    │ $MC_TRAFO_AXES_IN_1[0..1]         │ Input geometry axes      │
-;   │ 24120    │ $MC_TRAFO_AXES_OUT_1[0..2]        │ Output machine axes      │
-;   │ 24820    │ $MC_TRAANG_ANGLE_1                │ Inclination angle α [deg]│
-;   │ 24830    │ $MC_TRAANG_PARALLEL_AXIS_1        │ Axis parallel to virtual │
-;   │ 24840    │ $MC_TRAANG_AXES_IN_1[0..1]        │ Input (virtual) axes     │
-;   │ 24850    │ $MC_TRAANG_AXES_OUT_1[0..1]       │ Output (physical) axes   │
+;   │ 24100    │ TRAFO_TYPE_1                       │ = 1024+ for TRAANG       │
+;   │ 24110    │ TRAFO_AXES_IN_1[0..n]              │ Axis mapping (input)     │
+;   │ 24120    │ TRAFO_GEOAX_ASSIGN_TAB_1[0..2]     │ Geometry-axis assignment │
+;   │ 24700    │ TRAANG_ANGLE_1                     │ Inclination angle α [deg]│
+;   │ 24710    │ TRAANG_BASE_TOOL_1[0..2]           │ Base-tool offset vector  │
+;   │ 24720    │ TRAANG_PARALLEL_VELO_RES_1         │ Velocity reserve (0..1)  │
 ;   └──────────┴──────────────────────────────────┴──────────────────────────┘
 ;
-;   The inclination angle (MD24820) is the most critical geometric parameter.
+;   The inclination angle (MD24700) is the most critical geometric parameter.
 ;   It must be set to match the actual mechanical angle of the slide on the
 ;   machine.  A value of 0° makes TRAANG degenerate into a Cartesian identity.
 ;   Values between 10° and 80° are typical on grinding machines.
 ;
 ;   G-codes for TRAANG:
-;     TRAANG    – activate inclined-axis transformation
-;     TRAANG(α) – activate with explicit angle α [deg] (overrides MD24820)
+;     TRAANG    – activate inclined-axis transformation (use MD24700 angle)
+;     TRAANG(α) – activate with explicit angle α [deg] (overrides MD24700)
 ;     TRAFOOF   – deactivate transformation
 ;
 ;   Runtime variables:
 ;     $P_TRAFO      – active transformation name
 ;     $P_TRAANG_ANG – current angle as activated (degree)
 ;
-; PLATFORM:    Siemens SINUMERIK 840D sl / SINUMERIK ONE  (FW >= 4.5)
+; PLATFORM:    Siemens SINUMERIK 840D sl / SINUMERIK ONE
 ; LANGUAGE:    SINUMERIK NC High-Level Language (HLL)
 ; OUTPUT FILE: /user/sinumerik/hmi/log/traang_kinematics.txt
 ;
 ; REVISION HISTORY:
 ;   2024-01-01  Initial version
+;   2024-06-01  Corrected all MD numbers from reference manual
 ; ============================================================================
 
 ; --- Working variables -------------------------------------------------------
@@ -66,9 +67,10 @@ DEF INT         _fd
 DEF INT         _trafoType
 DEF REAL        _angle
 DEF REAL        _angleRt
-DEF INT         _parallelAx
+DEF REAL        _veloRes
 DEF STRING[120] _line
 DEF INT         _i
+DEF REAL        _rx, _ry, _rz
 
 ; --- Output file path --------------------------------------------------------
 DEF STRING[120] _outFile
@@ -78,7 +80,7 @@ _outFile = "/user/sinumerik/hmi/log/traang_kinematics.txt"
 ; Main program body
 ; ============================================================================
 
-_fd = FILEOPEN(_outFile, "w")
+_fd = FILEOPEN(_outFile, 0)           ; 0 = write / create-or-truncate
 IF _fd < 0
   MSG("ERROR: Cannot create " << _outFile)
   M30
@@ -87,6 +89,7 @@ ENDIF
 ; ---- Header -----------------------------------------------------------------
 FILEWRITE(_fd, "============================================================")
 FILEWRITE(_fd, "  SINUMERIK KINEMATICS REPORT — TRAANG (INCLINED-AXIS TRANSFORMATION)")
+FILEWRITE(_fd, "  Reference: 840Dsl_md_para_lists_man_1219_en-US")
 FILEWRITE(_fd, "============================================================")
 FILEWRITE(_fd, "")
 FILEWRITE(_fd, "  TRAANG maps an oblique physical slide into a virtual Cartesian axis.")
@@ -100,46 +103,48 @@ FILEWRITE(_fd, "")
 
 ; ---- Transformation type ---------------------------------------------------
 _trafoType = $MC_TRAFO_TYPE_1
-FILEWRITE(_fd, "--- TRANSFORMATION TYPE (MD24100 TRAFO_TYPE_1) ---")
-_line = "  TRAFO_TYPE_1 = " << TOSTRING(_trafoType) << "  (expected: 64 = TRAANG)"
+FILEWRITE(_fd, "--- TRANSFORMATION TYPE (MD24100  $MC_TRAFO_TYPE_1) ---")
+FILEWRITE(_fd, "  TRAANG type codes: 1024 to 1039 (low 4 bits = sub-variant).")
+_line = "  TRAFO_TYPE_1 = " << TOSTRING(_trafoType)
 FILEWRITE(_fd, _line)
-IF _trafoType == 64
+IF (_trafoType >= 1024) AND (_trafoType <= 1039)
   FILEWRITE(_fd, "  => TRAANG (inclined-axis transformation) is configured.")
 ELSE
-  _line = "  => WARNING: TRAFO_TYPE_1 is NOT 64.  Actual type code = " << TOSTRING(_trafoType)
+  _line = "  => WARNING: TRAFO_TYPE_1 is not in the TRAANG range 1024-1039."
+  FILEWRITE(_fd, _line)
+  _line = "               Actual type code = " << TOSTRING(_trafoType)
   FILEWRITE(_fd, _line)
 ENDIF
 FILEWRITE(_fd, "")
 
 ; ---- Axis assignment -------------------------------------------------------
 FILEWRITE(_fd, "--- AXIS ASSIGNMENT ---")
-FILEWRITE(_fd, "  Input (virtual) geometry axes (MD24110 TRAFO_AXES_IN_1[]):")
-FILEWRITE(_fd, "    [0] = virtual axis 1 (e.g. virtual Z)")
-FILEWRITE(_fd, "    [1] = virtual axis 2 (e.g. virtual Y)")
-FOR _i = 0 TO 1
+FILEWRITE(_fd, "  Input (virtual) geometry axes (MD24110  $MC_TRAFO_AXES_IN_1[]) — 0 = unused:")
+FOR _i = 0 TO 2
   _line = "    TRAFO_AXES_IN_1[" << TOSTRING(_i) << "] = " << TOSTRING($MC_TRAFO_AXES_IN_1[_i])
   FILEWRITE(_fd, _line)
 ENDFOR
 FILEWRITE(_fd, "")
-FILEWRITE(_fd, "  Output (physical) machine axes (MD24120 TRAFO_AXES_OUT_1[]):")
-FILEWRITE(_fd, "    [0] = physical axis 1 (e.g. physical Z)")
-FILEWRITE(_fd, "    [1] = physical inclined axis (e.g. physical Y slide at angle α)")
-FOR _i = 0 TO 1
-  _line = "    TRAFO_AXES_OUT_1[" << TOSTRING(_i) << "] = " << TOSTRING($MC_TRAFO_AXES_OUT_1[_i])
+FILEWRITE(_fd, "  Geometry-axis → channel-axis assignment")
+FILEWRITE(_fd, "  (MD24120  $MC_TRAFO_GEOAX_ASSIGN_TAB_1[0..2]):")
+FILEWRITE(_fd, "  [1] = axis parallel to one physical axis (reference axis)")
+FILEWRITE(_fd, "  [2] = virtual axis corresponding to the inclined physical axis")
+FOR _i = 0 TO 2
+  _line = "    geom axis [" << TOSTRING(_i) << "] mapped to channel axis = " << TOSTRING($MC_TRAFO_GEOAX_ASSIGN_TAB_1[_i])
   FILEWRITE(_fd, _line)
 ENDFOR
 FILEWRITE(_fd, "")
 
-; ---- Inclination angle (MD24820) -------------------------------------------
-FILEWRITE(_fd, "--- INCLINATION ANGLE (MD24820 TRAANG_ANGLE_1) ---")
+; ---- Inclination angle (MD24700) -------------------------------------------
+FILEWRITE(_fd, "--- INCLINATION ANGLE (MD24700  $MC_TRAANG_ANGLE_1) ---")
+FILEWRITE(_fd, "  Angle of the inclined axis in degrees between the 1st machine")
+FILEWRITE(_fd, "  axis and the 1st basic axis while TRAANG is active.")
+FILEWRITE(_fd, "  The angle is measured positively clockwise.")
+FILEWRITE(_fd, "  This is the key geometric parameter — must match the machine.")
+FILEWRITE(_fd, "  Typical values: 0° (degenerate), 30° (form grinding), 45° (diamond dress).")
 _angle = $MC_TRAANG_ANGLE_1
 _line = "  TRAANG_ANGLE_1 = " << TOSTRING(_angle) << " [deg]"
 FILEWRITE(_fd, _line)
-FILEWRITE(_fd, "  This is the mechanical angle between the inclined physical slide")
-FILEWRITE(_fd, "  and the reference (virtual Cartesian) direction.")
-FILEWRITE(_fd, "  - 0 deg  : no inclination (identity transformation)")
-FILEWRITE(_fd, "  - 45 deg : typical diamond-dressing slide on cylindrical grinder")
-FILEWRITE(_fd, "  - 30 deg : typical form-grinding cross-slide")
 FILEWRITE(_fd, "")
 _line = "  Derived: cos(α) = " << TOSTRING(COS(_angle * $PI / 180.0))
 FILEWRITE(_fd, _line)
@@ -149,43 +154,45 @@ _line = "  Derived: tan(α) = " << TOSTRING(TAN(_angle * $PI / 180.0))
 FILEWRITE(_fd, _line)
 FILEWRITE(_fd, "")
 
+; ---- Base tool vector (MD24710) -------------------------------------------
+FILEWRITE(_fd, "--- BASE TOOL VECTOR (MD24710  $MC_TRAANG_BASE_TOOL_1) ---")
+FILEWRITE(_fd, "  Basic offset of the tool zero for the TRAANG transformation.")
+FILEWRITE(_fd, "  Referenced to the geometry axes active when TRAANG is active.")
+FILEWRITE(_fd, "  Applied with and without tool-length compensation.")
+FILEWRITE(_fd, "  Programmed length corrections are additive to this base tool.")
+_rx = $MC_TRAANG_BASE_TOOL_1[0]
+_ry = $MC_TRAANG_BASE_TOOL_1[1]
+_rz = $MC_TRAANG_BASE_TOOL_1[2]
+_line = "  TRAANG_BASE_TOOL_1 = [" << TOSTRING(_rx) << ", " << TOSTRING(_ry) << ", " << TOSTRING(_rz) << "]  [mm]"
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+
+; ---- Parallel axis velocity reserve (MD24720) -----------------------------
+FILEWRITE(_fd, "--- PARALLEL AXIS VELOCITY RESERVE (MD24720  $MC_TRAANG_PARALLEL_VELO_RES_1) ---")
+FILEWRITE(_fd, "  Velocity reserve held ready on the parallel axis for compensating")
+FILEWRITE(_fd, "  motion (jog, positioning, oscillating movements) during TRAANG.")
+FILEWRITE(_fd, "  Parallel axis = the axis that runs parallel to one virtual Cartesian axis")
+FILEWRITE(_fd, "  (see MD24110  $MC_TRAFO_AXES_IN_1 index [1]).")
+FILEWRITE(_fd, "  0.0  = control determines reserve automatically from angle and axis capacities.")
+FILEWRITE(_fd, "  >0.0 = fixed reserve: value × MD32000 $MA_MAX_AX_VELO of the parallel axis.")
+_veloRes = $MC_TRAANG_PARALLEL_VELO_RES_1
+_line = "  TRAANG_PARALLEL_VELO_RES_1 = " << TOSTRING(_veloRes) << " (dimensionless, 0..1)"
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+
 ; ---- Runtime angle (if TRAANG activated with explicit angle) ---------------
 _angleRt = $P_TRAANG_ANG
 FILEWRITE(_fd, "--- RUNTIME ANGLE (active when TRAANG is running) ---")
 _line = "  $P_TRAANG_ANG (active angle at runtime) = " << TOSTRING(_angleRt) << " [deg]"
 FILEWRITE(_fd, _line)
-FILEWRITE(_fd, "  Note: TRAANG(α) call in part program can override MD24820 at runtime.")
-FILEWRITE(_fd, "")
-
-; ---- Parallel axis (MD24830) -----------------------------------------------
-FILEWRITE(_fd, "--- PARALLEL AXIS (MD24830 TRAANG_PARALLEL_AXIS_1) ---")
-_parallelAx = $MC_TRAANG_PARALLEL_AXIS_1
-_line = "  TRAANG_PARALLEL_AXIS_1 = " << TOSTRING(_parallelAx)
-FILEWRITE(_fd, _line)
-FILEWRITE(_fd, "  Specifies which virtual axis is parallel to one of the physical axes.")
-FILEWRITE(_fd, "  (Defines the reference axis from which the inclination is measured.)")
-FILEWRITE(_fd, "")
-
-; ---- Detailed inclined-axis input/output (MD24840, MD24850) ---------------
-FILEWRITE(_fd, "--- DETAILED TRAANG AXIS MAPPING ---")
-FILEWRITE(_fd, "  MD24840 TRAANG_AXES_IN_1[] — virtual (programmed) axes:")
-FOR _i = 0 TO 1
-  _line = "    TRAANG_AXES_IN_1[" << TOSTRING(_i) << "] = " << TOSTRING($MC_TRAANG_AXES_IN_1[_i])
-  FILEWRITE(_fd, _line)
-ENDFOR
-FILEWRITE(_fd, "")
-FILEWRITE(_fd, "  MD24850 TRAANG_AXES_OUT_1[] — physical (machine) axes:")
-FOR _i = 0 TO 1
-  _line = "    TRAANG_AXES_OUT_1[" << TOSTRING(_i) << "] = " << TOSTRING($MC_TRAANG_AXES_OUT_1[_i])
-  FILEWRITE(_fd, _line)
-ENDFOR
+FILEWRITE(_fd, "  Note: TRAANG(α) call in part program can override MD24700 at runtime.")
 FILEWRITE(_fd, "")
 
 ; ---- Kinematic equations ---------------------------------------------------
 FILEWRITE(_fd, "--- KINEMATIC TRANSFORMATION EQUATIONS ---")
 FILEWRITE(_fd, "  Let Z_v = virtual Z (programmed), Y_v = virtual Y (programmed)")
 FILEWRITE(_fd, "  Let Z_p = physical Z slide,       Y_p = physical inclined slide")
-FILEWRITE(_fd, "  Let α   = TRAANG_ANGLE_1")
+FILEWRITE(_fd, "  Let α   = TRAANG_ANGLE_1 (MD24700)")
 FILEWRITE(_fd, "")
 FILEWRITE(_fd, "  Forward (virtual -> physical):")
 FILEWRITE(_fd, "    Z_p = Z_v + Y_v * sin(α)")
@@ -231,3 +238,4 @@ M30
 ; ============================================================================
 ; End of READ_TRAANG_KINEMATICS.MPF
 ; ============================================================================
+

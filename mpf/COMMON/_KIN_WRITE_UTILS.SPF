@@ -40,7 +40,7 @@
 ; ---------------------------------------------------------------------------
 PROC KIN_OPEN_FILE(STRING[120] sPath) SAVE
 DEF INT _fd
-_fd = FILEOPEN(sPath, "w")
+_fd = FILEOPEN(sPath, 0)          ; mode 0 = write / create-or-truncate
 RET(_fd)
 
 ; ---------------------------------------------------------------------------
