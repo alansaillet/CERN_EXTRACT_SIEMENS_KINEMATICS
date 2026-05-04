@@ -1,0 +1,293 @@
+; ============================================================================
+; READ_TRAORI_KINEMATICS.MPF
+; Program: Read and report TRAORI 5-axis transformation kinematics
+;
+; DESCRIPTION:
+;   TRAORI (Tool Orientation transformation) is Siemens SINUMERIK's standard
+;   5-axis simultaneous milling transformation.  It allows the CNC to drive two
+;   additional rotary axes that tilt / rotate the tool (or the workpiece) so
+;   that the programmed tool-tip position is always reached with the correct
+;   orientation.
+;
+;   Three mechanical configurations are supported and distinguished by the
+;   value of MD24100 $MC_TRAFO_TYPE_1 (bits [11:4] = group, bits [3:0] = seq):
+;
+;   1. HEAD-HEAD (turnable tool / swivel-head)
+;      Both rotary axes are mounted between the spindle and the machine column.
+;      The workpiece does not rotate.  Typical: AC-head, BC-head.
+;      MD24100  TRAFO_TYPE = 16 to 31
+;        Low 4 bits encode axis sequence: 0=AB, 1=AC, 2=BA, 3=BC, 4=CA, 5=CB
+;        Example: 20 = 16+4 = head-head with CA (C-outer/A-inner) sequence
+;
+;   2. TABLE-TABLE (turnable workpiece / rotary table)
+;      Both rotary axes carry the workpiece.  The spindle translates only.
+;      Typical: A/C-table, B/C-table.
+;      MD24100  TRAFO_TYPE = 32 to 47
+;
+;   3. MIXED (head + table)
+;      One rotary on the tool side, one on the workpiece side.
+;      MD24100  TRAFO_TYPE = 48 to 63
+;
+;   Key machine-data parameters (channel MD, $MC_xxx), from reference manual
+;   840Dsl_md_para_lists_man_1219_en-US:
+;   ┌──────────┬──────────────────────────────────┬──────────────────────────┐
+;   │ MD number│ Variable name ($MC_)              │ Description              │
+;   ├──────────┼──────────────────────────────────┼──────────────────────────┤
+;   │ 24100    │ TRAFO_TYPE_1                       │ Transformation type      │
+;   │ 24110    │ TRAFO_AXES_IN_1[0..n]              │ Axis mapping (input)     │
+;   │ 24120    │ TRAFO_GEOAX_ASSIGN_TAB_1[0..2]     │ Geometry-axis assignment │
+;   │ 24500    │ TRAFO5_PART_OFFSET_1[0..2]         │ Workpiece-carrier offset │
+;   │ 24510    │ TRAFO5_ROT_AX_OFFSET_1[0..2]       │ Rotary-axis angle offset │
+;   │ 24520    │ TRAFO5_ROT_SIGN_IS_PLUS_1[0..2]    │ Sign of rotary axes      │
+;   │ 24530    │ TRAFO5_NON_POLE_LIMIT_1            │ Pole-range angle limit   │
+;   │ 24540    │ TRAFO5_POLE_LIMIT_1                │ End-angle tolerance/pole │
+;   │ 24550    │ TRAFO5_BASE_TOOL_1[0..2]           │ Base-tool vector at zero │
+;   │ 24558    │ TRAFO5_JOINT_OFFSET_PART_1[0..2]   │ Table-joint offset(MIXED)│
+;   │ 24560    │ TRAFO5_JOINT_OFFSET_1[0..2]        │ Vector between rot joints│
+;   └──────────┴──────────────────────────────────┴──────────────────────────┘
+;
+;   Runtime G-codes:
+;     TRAORI    – activate 5-axis orientation transformation
+;     TRAFOOF   – deactivate transformation
+;     ORIWKS    – orientations relative to work-coordinate system (default)
+;     ORIMKS    – orientations relative to machine-coordinate system
+;     ORIAXES   – orientation specified by actual rotary-axis values (A/B/C)
+;     ORIVECT   – orientation via tool-direction vector (A3= B3= C3=)
+;     ORIEULER  – orientation via Euler angles (NUT= PREC= SPIN=)
+;     ORIRPY    – orientation via Roll-Pitch-Yaw angles
+;     OIPLANE   – keeps tool perpendicular to a selected plane
+;
+; PLATFORM:    Siemens SINUMERIK 840D sl / SINUMERIK ONE
+; LANGUAGE:    SINUMERIK NC High-Level Language (HLL)
+; OUTPUT FILE: /user/sinumerik/hmi/log/traori_kinematics.txt
+;
+; FUNCTION SOURCES:
+;   Every NC language function used here (FILEOPEN, FILEWRITE, FILECLOSE,
+;   TOSTRING, MSG, FOR, IF, DEF, M30, INT, <<) is documented with its
+;   exact Siemens manual reference in:
+;     references/NC_FUNCTIONS_REFERENCE.md
+;   The primary source is the SINUMERIK 840D sl / SINUMERIK ONE
+;   "Programming Manual: Job Planning" (6FC5398-2AP40-0BA3).
+;
+; REVISION HISTORY:
+;   2024-01-01  Initial version
+;   2024-06-01  Corrected all MD numbers from reference manual
+; ============================================================================
+
+; --- Working variables -------------------------------------------------------
+DEF INT         _fd          ; file descriptor
+DEF INT         _trafoType   ; TRAFO_TYPE_1 raw value
+DEF INT         _typeGroup   ; TRAFO_TYPE stripped of low-4-bit variant
+DEF STRING[120] _line        ; formatted output line
+DEF STRING[60]  _confStr     ; configuration description string
+DEF INT         _i           ; loop index
+DEF REAL        _rx, _ry, _rz; temporary vector components
+
+; --- Output file path --------------------------------------------------------
+DEF STRING[120] _outFile
+_outFile = "/user/sinumerik/hmi/log/traori_kinematics.txt"
+
+; ============================================================================
+; Main program body
+; ============================================================================
+
+_fd = FILEOPEN(_outFile, 0)           ; 0 = write / create-or-truncate
+IF _fd < 0
+  MSG("ERROR: Cannot create " << _outFile)
+  M30
+ENDIF
+
+; ---- Header -----------------------------------------------------------------
+FILEWRITE(_fd, "============================================================")
+FILEWRITE(_fd, "  SINUMERIK KINEMATICS REPORT — TRAORI (5-AXIS MILLING)")
+FILEWRITE(_fd, "  Reference: 840Dsl_md_para_lists_man_1219_en-US")
+FILEWRITE(_fd, "============================================================")
+FILEWRITE(_fd, "")
+_line = "  NC program   : " << $P_PROG
+FILEWRITE(_fd, _line)
+_line = "  Channel       : " << TOSTRING($AC_CHANNO)
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+
+; ---- Transformation type ---------------------------------------------------
+_trafoType = $MC_TRAFO_TYPE_1
+; Extract group base: strip low 4 bits
+; For groups 16/32/48 (5-axis) the low nibble encodes axis sequence (0-5).
+; Group base = INT(_trafoType / 16) * 16  (valid for 16/32/48)
+_typeGroup = INT(_trafoType / 16) * 16
+
+FILEWRITE(_fd, "--- TRANSFORMATION TYPE (MD24100  $MC_TRAFO_TYPE_1) ---")
+FILEWRITE(_fd, "  Bits [3:0] = axis-sequence sub-variant; bits [11:4] = group.")
+FILEWRITE(_fd, "  Axis sequences: 0=AB, 1=AC, 2=BA, 3=BC, 4=CA, 5=CB")
+_line = "  TRAFO_TYPE_1 = " << TOSTRING(_trafoType) << "  (group base = " << TOSTRING(_typeGroup) << ")"
+FILEWRITE(_fd, _line)
+
+IF (_trafoType >= 16) AND (_trafoType <= 31)
+  _confStr = "TRAORI – HEAD-HEAD  (both rotary axes on tool/spindle side)"
+ENDIF
+IF (_trafoType >= 32) AND (_trafoType <= 47)
+  _confStr = "TRAORI – TABLE-TABLE  (both rotary axes on workpiece side)"
+ENDIF
+IF (_trafoType >= 48) AND (_trafoType <= 63)
+  _confStr = "TRAORI – MIXED  (one rotary on tool side, one on workpiece side)"
+ENDIF
+IF _trafoType == 72
+  _confStr = "TRAORI – GENERIC  (kinematic data taken from TCARR orientable holder)"
+ENDIF
+IF (_trafoType < 16) OR ((_trafoType > 63) AND (_trafoType <> 72))
+  _confStr = "Non-TRAORI type — this program reads TRAORI parameters only"
+ENDIF
+
+_line = "           => " << _confStr
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+
+; ---- Axis assignment (MD24110, MD24120) ------------------------------------
+FILEWRITE(_fd, "--- AXIS ASSIGNMENT ---")
+FILEWRITE(_fd, "  Input axes (MD24110  $MC_TRAFO_AXES_IN_1[]) — 0 = unused:")
+FOR _i = 0 TO 4
+  _line = "    [" << TOSTRING(_i) << "] channel-axis index = " << TOSTRING($MC_TRAFO_AXES_IN_1[_i])
+  FILEWRITE(_fd, _line)
+ENDFOR
+FILEWRITE(_fd, "")
+FILEWRITE(_fd, "  Geometry-axis → channel-axis assignment")
+FILEWRITE(_fd, "  (MD24120  $MC_TRAFO_GEOAX_ASSIGN_TAB_1[0..2]):")
+FOR _i = 0 TO 2
+  _line = "    geom axis [" << TOSTRING(_i) << "] mapped to channel axis = " << TOSTRING($MC_TRAFO_GEOAX_ASSIGN_TAB_1[_i])
+  FILEWRITE(_fd, _line)
+ENDFOR
+FILEWRITE(_fd, "")
+
+; ---- Workpiece-carrier offset (MD24500) ------------------------------------
+FILEWRITE(_fd, "--- WORKPIECE-CARRIER OFFSET (MD24500  $MC_TRAFO5_PART_OFFSET_1) ---")
+FILEWRITE(_fd, "  Meaning depends on machine configuration:")
+FILEWRITE(_fd, "  HEAD-HEAD  : vector from machine ref point to workpiece-table zero.")
+FILEWRITE(_fd, "  TABLE-TABLE: vector from 2nd rotary joint to workpiece-table zero.")
+FILEWRITE(_fd, "  MIXED      : vector from workpiece-table joint to table zero.")
+_rx = $MC_TRAFO5_PART_OFFSET_1[0]
+_ry = $MC_TRAFO5_PART_OFFSET_1[1]
+_rz = $MC_TRAFO5_PART_OFFSET_1[2]
+_line = "  PART_OFFSET_1 = [" << TOSTRING(_rx) << ", " << TOSTRING(_ry) << ", " << TOSTRING(_rz) << "]  [mm]"
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+
+; ---- Rotary-axis angle offsets (MD24510) -----------------------------------
+FILEWRITE(_fd, "--- ROTARY-AXIS ANGLE OFFSETS (MD24510  $MC_TRAFO5_ROT_AX_OFFSET_1) ---")
+FILEWRITE(_fd, "  Angular offset of each orientation rotary axis in degrees at the")
+FILEWRITE(_fd, "  neutral / reference position while TRAORI is active.")
+FILEWRITE(_fd, "  Index 0 = 1st orientation axis, index 1 = 2nd orientation axis.")
+_rx = $MC_TRAFO5_ROT_AX_OFFSET_1[0]
+_ry = $MC_TRAFO5_ROT_AX_OFFSET_1[1]
+_rz = $MC_TRAFO5_ROT_AX_OFFSET_1[2]
+_line = "  ROT_AX_OFFSET_1 = [" << TOSTRING(_rx) << ", " << TOSTRING(_ry) << ", " << TOSTRING(_rz) << "]  [deg]"
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+
+; ---- Rotary-axis sign convention (MD24520) ---------------------------------
+FILEWRITE(_fd, "--- ROTARY-AXIS SIGN (MD24520  $MC_TRAFO5_ROT_SIGN_IS_PLUS_1) ---")
+FILEWRITE(_fd, "  TRUE  = axis moves in mathematically positive direction (no reversal).")
+FILEWRITE(_fd, "  FALSE = axis direction is reversed in the transformation.")
+FILEWRITE(_fd, "  Index 0 = 1st orientation axis, index 1 = 2nd orientation axis.")
+IF $MC_TRAFO5_ROT_SIGN_IS_PLUS_1[0] == TRUE
+  FILEWRITE(_fd, "  ROT_SIGN_IS_PLUS_1[0] = TRUE  (1st orientation axis, standard direction)")
+ELSE
+  FILEWRITE(_fd, "  ROT_SIGN_IS_PLUS_1[0] = FALSE (1st orientation axis, reversed)")
+ENDIF
+IF $MC_TRAFO5_ROT_SIGN_IS_PLUS_1[1] == TRUE
+  FILEWRITE(_fd, "  ROT_SIGN_IS_PLUS_1[1] = TRUE  (2nd orientation axis, standard direction)")
+ELSE
+  FILEWRITE(_fd, "  ROT_SIGN_IS_PLUS_1[1] = FALSE (2nd orientation axis, reversed)")
+ENDIF
+FILEWRITE(_fd, "")
+
+; ---- Base tool direction (MD24550) ----------------------------------------
+FILEWRITE(_fd, "--- BASE TOOL VECTOR (MD24550  $MC_TRAFO5_BASE_TOOL_1) ---")
+FILEWRITE(_fd, "  Direction the tool points when no tool-length compensation is")
+FILEWRITE(_fd, "  selected and the transformation is activated.  Programmed length")
+FILEWRITE(_fd, "  compensations are added to this vector.")
+_rx = $MC_TRAFO5_BASE_TOOL_1[0]
+_ry = $MC_TRAFO5_BASE_TOOL_1[1]
+_rz = $MC_TRAFO5_BASE_TOOL_1[2]
+_line = "  BASE_TOOL_1 = [" << TOSTRING(_rx) << ", " << TOSTRING(_ry) << ", " << TOSTRING(_rz) << "]  [mm]"
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+
+; ---- Joint offset — between rotary joints (MD24560) -----------------------
+FILEWRITE(_fd, "--- JOINT OFFSET VECTOR (MD24560  $MC_TRAFO5_JOINT_OFFSET_1) ---")
+FILEWRITE(_fd, "  HEAD / TABLE configurations:")
+FILEWRITE(_fd, "    Vector between the 1st and 2nd rotary joint of the tool head")
+FILEWRITE(_fd, "    or workpiece rotary table.")
+FILEWRITE(_fd, "  MIXED configuration:")
+FILEWRITE(_fd, "    Vector from machine reference point to the workpiece-table joint.")
+_rx = $MC_TRAFO5_JOINT_OFFSET_1[0]
+_ry = $MC_TRAFO5_JOINT_OFFSET_1[1]
+_rz = $MC_TRAFO5_JOINT_OFFSET_1[2]
+_line = "  JOINT_OFFSET_1 = [" << TOSTRING(_rx) << ", " << TOSTRING(_ry) << ", " << TOSTRING(_rz) << "]  [mm]"
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+
+; ---- Joint offset assigned to table side — MIXED only (MD24558) -----------
+FILEWRITE(_fd, "--- TABLE-SIDE JOINT OFFSET (MD24558  $MC_TRAFO5_JOINT_OFFSET_PART_1) ---")
+FILEWRITE(_fd, "  Only evaluated for MIXED kinematics (TRAFO_TYPE 48-63).")
+FILEWRITE(_fd, "  Part of the joint-to-head vector assigned to the TABLE side.")
+FILEWRITE(_fd, "  The transformation equations use the SUM of JOINT_OFFSET_1 and")
+FILEWRITE(_fd, "  JOINT_OFFSET_PART_1; only JOINT_OFFSET_1 is used by GETTCOR.")
+_rx = $MC_TRAFO5_JOINT_OFFSET_PART_1[0]
+_ry = $MC_TRAFO5_JOINT_OFFSET_PART_1[1]
+_rz = $MC_TRAFO5_JOINT_OFFSET_PART_1[2]
+_line = "  JOINT_OFFSET_PART_1 = [" << TOSTRING(_rx) << ", " << TOSTRING(_ry) << ", " << TOSTRING(_rz) << "]  [mm]"
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+
+; ---- Singularity / pole handling (MD24530, MD24540) -----------------------
+FILEWRITE(_fd, "--- SINGULARITY (POLE) HANDLING ---")
+_line = "  MD24530  $MC_TRAFO5_NON_POLE_LIMIT_1 = " << TOSTRING($MC_TRAFO5_NON_POLE_LIMIT_1) << " [deg]"
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "    Limit angle for the 5th (outer) orientation axis.")
+FILEWRITE(_fd, "    If the programmed path approaches the pole within this angle,")
+FILEWRITE(_fd, "    SINUMERIK re-routes the path through the pole (interpolation change).")
+FILEWRITE(_fd, "    Alarm 14112 is raised if the resulting endpoint deviation exceeds")
+FILEWRITE(_fd, "    the POLE_LIMIT_1 tolerance.")
+FILEWRITE(_fd, "")
+_line = "  MD24540  $MC_TRAFO5_POLE_LIMIT_1     = " << TOSTRING($MC_TRAFO5_POLE_LIMIT_1) << " [deg]"
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "    Maximum permitted end-angle deviation of the polar axis when the")
+FILEWRITE(_fd, "    controller switches to pole-interpolation mode.")
+FILEWRITE(_fd, "    If the actual deviation would exceed this value, Alarm 14112 is")
+FILEWRITE(_fd, "    raised and the block is not executed.")
+FILEWRITE(_fd, "")
+
+; ---- Active-transformation runtime data ------------------------------------
+FILEWRITE(_fd, "--- RUNTIME TRANSFORMATION STATUS ---")
+_line = "  $P_TRAFO (active transformation name) = " << $P_TRAFO
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "  (empty = no transformation active, i.e., TRAFOOF state)")
+FILEWRITE(_fd, "")
+
+; ---- Orientation programming modes -----------------------------------------
+FILEWRITE(_fd, "--- ORIENTATION PROGRAMMING MODES (G-codes) ---")
+FILEWRITE(_fd, "  TRAORI   : activate 5-axis orientation transformation")
+FILEWRITE(_fd, "  TRAFOOF  : deactivate transformation")
+FILEWRITE(_fd, "  ORIWKS   : orientations relative to work-coordinate system (default)")
+FILEWRITE(_fd, "  ORIMKS   : orientations relative to machine-coordinate system")
+FILEWRITE(_fd, "  ORIAXES  : orientation specified by actual rotary-axis values (A/B/C)")
+FILEWRITE(_fd, "  ORIVECT  : orientation via tool-direction vector (A3= B3= C3=)")
+FILEWRITE(_fd, "  ORIEULER : orientation via Euler angles (NUT= PREC= SPIN=)")
+FILEWRITE(_fd, "  ORIRPY   : orientation via Roll-Pitch-Yaw angles")
+FILEWRITE(_fd, "  OIPLANE  : keeps tool perpendicular to a selected plane")
+FILEWRITE(_fd, "")
+
+; ---- Footer -----------------------------------------------------------------
+FILEWRITE(_fd, "============================================================")
+FILEWRITE(_fd, "  End of TRAORI kinematics report")
+FILEWRITE(_fd, "============================================================")
+
+FILECLOSE(_fd)
+MSG("TRAORI kinematics report written to: " << _outFile)
+
+M30
+
+; ============================================================================
+; End of READ_TRAORI_KINEMATICS.MPF
+; ============================================================================
+

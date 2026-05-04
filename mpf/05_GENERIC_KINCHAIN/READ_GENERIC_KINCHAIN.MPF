@@ -1,0 +1,291 @@
+; ============================================================================
+; READ_GENERIC_KINCHAIN.MPF
+; Program: Read and report a Generic Kinematic Chain (SINUMERIK ONE)
+;
+; DESCRIPTION:
+;   The Generic Kinematic Chain (GKC) is a modern, flexible way to describe
+;   machine kinematics in SINUMERIK ONE (and later 840D sl with GKC option).
+;   Unlike the classical approach (TRAORI/TRANSMIT/TRACYL/TRAANG) where the
+;   kinematics are hard-coded into a specific transformation type, a GKC lets
+;   you define an arbitrary serial chain of rigid-body transformations,
+;   each of which can be:
+;
+;     • ROTATION  — a revolute joint (rotary axis)
+;     • TRANSLATION — a prismatic joint (linear slide)
+;     • FIXED  — a constant offset (no associated machine axis)
+;
+;   The chain starts at the machine base frame and ends at the tool tip
+;   (tool chain) or at the workpiece zero point (workpiece chain).  At
+;   runtime, the CNC solves the forward and inverse kinematics of the full
+;   chain to interpolate any programmed path.
+;
+;   ─────────────────────────────────────────────────────────────────────────
+;   GKC System Variables  ($NK_ namespace, SINUMERIK ONE ≥ V6.x)
+;   ─────────────────────────────────────────────────────────────────────────
+;
+;   $NK_NUM_ELEMENTS          — total number of kinematic elements defined
+;   $NK_NAME[n]               — element name string (user-defined, e.g. "X_SLIDE")
+;   $NK_T_KIN_TYPE[n]         — element type:
+;                                 0 = FIXED       (rigid, no axis)
+;                                 1 = TRANSLATION (linear, requires axis)
+;                                 2 = ROTATION    (rotary, requires axis)
+;   $NK_T_KIN_VEC[n, 0..2]   — unit direction vector [X, Y, Z] of the joint
+;                               axis in the local (parent-link) frame
+;   $NK_T_KIN_OFFSET[n, 0..2]— translation offset [X, Y, Z] from parent
+;                               origin to this element's origin [mm]
+;   $NK_T_KIN_AXIS[n]         — index of the associated machine axis
+;                               (0 = none, used for FIXED elements)
+;   $NK_T_KIN_CHAIN[n]        — chain ID (0 = tool chain, 1 = workpiece chain)
+;   $NK_T_KIN_CTRL[n]         — control flags (reserved / version-dependent)
+;
+;   ─────────────────────────────────────────────────────────────────────────
+;   GKC Machine Data (SINUMERIK ONE / 840D sl with GKC option)
+;   ─────────────────────────────────────────────────────────────────────────
+;   The number of elements and their properties are configured through:
+;     MD24xxx  GKC_NUM_ELEMENTS  — total number of chain elements
+;     MD24xxx  GKC_ELEMENT_TYPE  — array of element types
+;     MD24xxx  GKC_ELEMENT_VEC   — array of axis direction vectors
+;     MD24xxx  GKC_ELEMENT_OFFSET— array of offset vectors
+;   (Exact MD numbers depend on the firmware version and OEM configuration.)
+;
+;   ─────────────────────────────────────────────────────────────────────────
+;   GKC G-code activation
+;   ─────────────────────────────="────────────────────────────────────────
+;   TRAORI    — activates the kinematics described by the GKC (same G-code)
+;   TRAFOOF   — deactivates
+;
+; PLATFORM:    Siemens SINUMERIK ONE  (FW >= V6.x)  /  840D sl with GKC option
+; LANGUAGE:    SINUMERIK NC High-Level Language (HLL)
+; OUTPUT FILE: /user/sinumerik/hmi/log/generic_kinchain.txt
+;
+; FUNCTION SOURCES:
+;   Every NC language function used here (FILEOPEN, FILEWRITE, FILECLOSE,
+;   TOSTRING, MSG, FOR, IF, DEF, M30, <<) is documented with its exact
+;   Siemens manual reference in:
+;     references/NC_FUNCTIONS_REFERENCE.md
+;   The primary source is the SINUMERIK 840D sl / SINUMERIK ONE
+;   "Programming Manual: Job Planning" (6FC5398-2AP40-0BA3).
+;   The $NK_ GKC system variables are documented in the SINUMERIK ONE
+;   "System Variables" manual (6FC5398-8CP40-0BA3).
+;
+; NOTES:
+;   1. If $NK_NUM_ELEMENTS returns 0, the GKC option is not active or
+;      no kinematic elements have been configured in machine data.
+;   2. The $NK_ system variable namespace was introduced in SINUMERIK ONE.
+;      On older 840D sl systems without the GKC option these variables
+;      are not available and this program will cause an alarm.
+;   3. Element indices are zero-based: first element is $NK_NAME[0].
+;
+; REVISION HISTORY:
+;   2024-01-01  Initial version
+; ============================================================================
+
+; --- Working variables -------------------------------------------------------
+DEF INT         _fd
+DEF INT         _nElements
+DEF INT         _i
+DEF INT         _eType
+DEF INT         _eAxis
+DEF INT         _eChain
+DEF REAL        _vx, _vy, _vz
+DEF REAL        _ox, _oy, _oz
+DEF STRING[60]  _eName
+DEF STRING[40]  _typeStr
+DEF STRING[40]  _chainStr
+DEF STRING[120] _line
+
+; --- Output file path --------------------------------------------------------
+DEF STRING[120] _outFile
+_outFile = "/user/sinumerik/hmi/log/generic_kinchain.txt"
+
+; ============================================================================
+; Main program body
+; ============================================================================
+
+_fd = FILEOPEN(_outFile, 0)
+IF _fd < 0
+  MSG("ERROR: Cannot create " << _outFile)
+  M30
+ENDIF
+
+; ---- Header -----------------------------------------------------------------
+FILEWRITE(_fd, "============================================================")
+FILEWRITE(_fd, "  SINUMERIK KINEMATICS REPORT — GENERIC KINEMATIC CHAIN (GKC)")
+FILEWRITE(_fd, "============================================================")
+FILEWRITE(_fd, "")
+FILEWRITE(_fd, "  A Generic Kinematic Chain defines the full machine kinematics")
+FILEWRITE(_fd, "  as a serial chain of FIXED, TRANSLATION and ROTATION elements.")
+FILEWRITE(_fd, "  This is the modern approach in SINUMERIK ONE replacing hard-coded")
+FILEWRITE(_fd, "  TRAORI/TRANSMIT/TRACYL/TRAANG type definitions for complex machines.")
+FILEWRITE(_fd, "")
+_line = "  NC program   : " << $P_PROG
+FILEWRITE(_fd, _line)
+_line = "  Channel       : " << TOSTRING($AC_CHANNO)
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+
+; ---- Number of chain elements ----------------------------------------------
+_nElements = $NK_NUM_ELEMENTS
+FILEWRITE(_fd, "--- CHAIN OVERVIEW ---")
+_line = "  $NK_NUM_ELEMENTS = " << TOSTRING(_nElements) << "  (total kinematic elements)"
+FILEWRITE(_fd, _line)
+IF _nElements == 0
+  FILEWRITE(_fd, "  => No GKC elements found.  Check:")
+  FILEWRITE(_fd, "       - GKC option is licensed and active")
+  FILEWRITE(_fd, "       - Machine data GKC_NUM_ELEMENTS > 0")
+  FILEWRITE(_fd, "       - Firmware is SINUMERIK ONE V6.x or later")
+  FILECLOSE(_fd)
+  M30
+ENDIF
+FILEWRITE(_fd, "")
+
+; ---- Element legends -------------------------------------------------------
+FILEWRITE(_fd, "--- ELEMENT TYPE LEGEND ---")
+FILEWRITE(_fd, "  Type 0 = FIXED       : constant rigid-body offset, no axis motion")
+FILEWRITE(_fd, "  Type 1 = TRANSLATION : linear prismatic joint (slide)")
+FILEWRITE(_fd, "  Type 2 = ROTATION    : revolute joint (rotary axis)")
+FILEWRITE(_fd, "")
+FILEWRITE(_fd, "--- CHAIN ID LEGEND ---")
+FILEWRITE(_fd, "  Chain 0 = TOOL CHAIN      : from machine base to tool gauge point")
+FILEWRITE(_fd, "  Chain 1 = WORKPIECE CHAIN : from machine base to workpiece zero")
+FILEWRITE(_fd, "")
+
+; ---- Per-element dump -------------------------------------------------------
+FILEWRITE(_fd, "--- KINEMATIC CHAIN ELEMENTS ---")
+FILEWRITE(_fd, "")
+
+FOR _i = 0 TO _nElements - 1
+
+  ; Element name
+  _eName = $NK_NAME[_i]
+  _line = "  ┌─ Element [" << TOSTRING(_i) << "] : " << _eName
+  FILEWRITE(_fd, _line)
+
+  ; Type
+  _eType = $NK_T_KIN_TYPE[_i]
+  IF _eType == 0
+    _typeStr = "FIXED"
+  ELSE
+    IF _eType == 1
+      _typeStr = "TRANSLATION (prismatic)"
+    ELSE
+      IF _eType == 2
+        _typeStr = "ROTATION (revolute)"
+      ELSE
+        _typeStr = "UNKNOWN"
+      ENDIF
+    ENDIF
+  ENDIF
+  _line = "  │  Type              : " << TOSTRING(_eType) << " = " << _typeStr
+  FILEWRITE(_fd, _line)
+
+  ; Chain assignment
+  _eChain = $NK_T_KIN_CHAIN[_i]
+  IF _eChain == 0
+    _chainStr = "TOOL chain (spindle side)"
+  ELSE
+    IF _eChain == 1
+      _chainStr = "WORKPIECE chain (table side)"
+    ELSE
+      _chainStr = "UNKNOWN chain"
+    ENDIF
+  ENDIF
+  _line = "  │  Chain             : " << TOSTRING(_eChain) << " = " << _chainStr
+  FILEWRITE(_fd, _line)
+
+  ; Associated machine axis
+  _eAxis = $NK_T_KIN_AXIS[_i]
+  IF _eAxis == 0
+    _line = "  │  Machine axis      : 0 = none (FIXED element)"
+  ELSE
+    _line = "  │  Machine axis      : " << TOSTRING(_eAxis) << "  (axis index in machine axis list)"
+  ENDIF
+  FILEWRITE(_fd, _line)
+
+  ; Direction vector of joint axis
+  _vx = $NK_T_KIN_VEC[_i, 0]
+  _vy = $NK_T_KIN_VEC[_i, 1]
+  _vz = $NK_T_KIN_VEC[_i, 2]
+  _line = "  │  Joint axis vector : [" << TOSTRING(_vx) << ", " << TOSTRING(_vy) << ", " << TOSTRING(_vz) << "]  (unit vec in parent frame)"
+  FILEWRITE(_fd, _line)
+  IF _eType == 1
+    FILEWRITE(_fd, "  │    => slide moves along this direction when the axis commands +1 mm")
+  ELSE
+    IF _eType == 2
+      FILEWRITE(_fd, "  │    => rotary axis rotates about this direction (right-hand rule = +)")
+    ENDIF
+  ENDIF
+
+  ; Translation offset from parent origin
+  _ox = $NK_T_KIN_OFFSET[_i, 0]
+  _oy = $NK_T_KIN_OFFSET[_i, 1]
+  _oz = $NK_T_KIN_OFFSET[_i, 2]
+  _line = "  │  Offset from parent: [" << TOSTRING(_ox) << ", " << TOSTRING(_oy) << ", " << TOSTRING(_oz) << "]  [mm]"
+  FILEWRITE(_fd, _line)
+  FILEWRITE(_fd, "  │    => constant translation from parent link origin to this element's origin")
+
+  FILEWRITE(_fd, "  └─────────────────────────────────────────────────────────")
+  FILEWRITE(_fd, "")
+
+ENDFOR
+
+; ---- Active transformation -------------------------------------------------
+FILEWRITE(_fd, "--- RUNTIME TRANSFORMATION STATUS ---")
+_line = "  $P_TRAFO (active transformation name) = " << $P_TRAFO
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+
+; ---- GKC activation --------------------------------------------------------
+FILEWRITE(_fd, "--- ACTIVATION G-CODES ---")
+FILEWRITE(_fd, "  TRAORI    — activate kinematics defined by the GKC")
+FILEWRITE(_fd, "  TRAFOOF   — deactivate")
+FILEWRITE(_fd, "  ORIVECT   — program orientation via tool-direction vector (A3=,B3=,C3=)")
+FILEWRITE(_fd, "  ORIAXES   — program orientation via actual rotary axis values (A=,B=,C=)")
+FILEWRITE(_fd, "  ORIRPY    — Roll-Pitch-Yaw orientation mode")
+FILEWRITE(_fd, "  ORIEULER  — Euler-angle orientation mode")
+FILEWRITE(_fd, "")
+FILEWRITE(_fd, "  Example with GKC 5-axis machine:")
+FILEWRITE(_fd, "    T1 D1             ; select tool")
+FILEWRITE(_fd, "    TRAORI            ; activate GKC-based 5-axis kinematics")
+FILEWRITE(_fd, "    ORIVECT           ; program tool orientation as vector")
+FILEWRITE(_fd, "    G0 X0 Y0 Z50 A3=0 B3=0 C3=-1  ; position at Z=50, spindle pointing -Z")
+FILEWRITE(_fd, "    G1 Z5 F1000       ; feed to near workpiece")
+FILEWRITE(_fd, "    G1 X50 A3=0.5 B3=0 C3=-0.866 F500  ; tilt tool during motion")
+FILEWRITE(_fd, "    TRAFOOF           ; deactivate")
+FILEWRITE(_fd, "")
+
+; ---- GKC chain example (comment block) ------------------------------------
+FILEWRITE(_fd, "--- EXAMPLE: TYPICAL 5-AXIS GANTRY MACHINE GKC DEFINITION ---")
+FILEWRITE(_fd, "  (Illustrative values — configure in machine data, not NC program)")
+FILEWRITE(_fd, "")
+FILEWRITE(_fd, "  TOOL CHAIN (spindle side, 0-based indices):")
+FILEWRITE(_fd, "    [0] Name=BASE_TO_X  Type=TRANSLATION  Vec=[1,0,0] Offset=[0,0,0]  Axis=X")
+FILEWRITE(_fd, "    [1] Name=X_TO_Y     Type=TRANSLATION  Vec=[0,1,0] Offset=[0,0,0]  Axis=Y")
+FILEWRITE(_fd, "    [2] Name=Y_TO_Z     Type=TRANSLATION  Vec=[0,0,-1] Offset=[0,0,0] Axis=Z")
+FILEWRITE(_fd, "    [3] Name=Z_TO_HEAD  Type=FIXED        Vec=[0,0,0]  Offset=[0,0,-150] Axis=0")
+FILEWRITE(_fd, "    [4] Name=HEAD_A     Type=ROTATION     Vec=[1,0,0]  Offset=[0,0,0]  Axis=A")
+FILEWRITE(_fd, "    [5] Name=A_TO_TIP   Type=FIXED        Vec=[0,0,0]  Offset=[0,0,-80]  Axis=0")
+FILEWRITE(_fd, "")
+FILEWRITE(_fd, "  WORKPIECE CHAIN (table side):")
+FILEWRITE(_fd, "    [6] Name=BASE_TO_C  Type=ROTATION     Vec=[0,0,1]  Offset=[0,0,0]  Axis=C")
+FILEWRITE(_fd, "    [7] Name=C_TO_WP    Type=FIXED        Vec=[0,0,0]  Offset=[0,0,150]  Axis=0")
+FILEWRITE(_fd, "")
+FILEWRITE(_fd, "  In this configuration:")
+FILEWRITE(_fd, "    - A is a head rotation (tilt around X), Offset to tip = 80 mm")
+FILEWRITE(_fd, "    - C is a table rotation (around Z),    Offset to WP = 150 mm")
+FILEWRITE(_fd, "    - The system solves the full kinematic chain at interpolation rate.")
+FILEWRITE(_fd, "")
+
+; ---- Footer -----------------------------------------------------------------
+FILEWRITE(_fd, "============================================================")
+FILEWRITE(_fd, "  End of Generic Kinematic Chain report")
+FILEWRITE(_fd, "============================================================")
+
+FILECLOSE(_fd)
+MSG("Generic Kinematic Chain report written to: " << _outFile)
+
+M30
+
+; ============================================================================
+; End of READ_GENERIC_KINCHAIN.MPF
+; ============================================================================

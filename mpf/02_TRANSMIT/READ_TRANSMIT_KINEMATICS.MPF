@@ -1,0 +1,247 @@
+; ============================================================================
+; READ_TRANSMIT_KINEMATICS.MPF
+; Program: Read and report TRANSMIT (polar transformation) kinematics
+;
+; DESCRIPTION:
+;   TRANSMIT (Transformation of Milling In Turning) is a SINUMERIK
+;   transformation that replaces a linear Y-axis on a lathe with a virtual
+;   axis driven by a combination of the physical X-axis and the C rotary
+;   axis.  It enables off-center milling on a turning machine without
+;   needing a dedicated Y-slide.
+;
+;   In polar coordinates, TRANSMIT maps:
+;     • Programmed Y-motion  → combined X + C rotation (polar kinematics)
+;     • Programmed X-motion  → radial motion
+;     • Programmed Z-motion  → axial motion (unchanged)
+;   The C-axis is the rotary (spindle) axis that positions the workpiece.
+;
+;   A "pole" singularity exists when the tool is exactly on the rotation
+;   axis (X = 0).  The TRANSMIT_POLE_SIDE_FIX_1 parameter controls behaviour
+;   near the pole.
+;
+;   Key machine-data parameters (channel MD, $MC_xxx), from reference manual
+;   840Dsl_md_para_lists_man_1219_en-US:
+;   ┌──────────┬──────────────────────────────────┬──────────────────────────┐
+;   │ MD number│ Variable name ($MC_)              │ Description              │
+;   ├──────────┼──────────────────────────────────┼──────────────────────────┤
+;   │ 24100    │ TRAFO_TYPE_1                       │ = 256+ for TRANSMIT      │
+;   │ 24110    │ TRAFO_AXES_IN_1[0..n]              │ Axis mapping (input)     │
+;   │ 24120    │ TRAFO_GEOAX_ASSIGN_TAB_1[0..2]     │ Geometry-axis assignment │
+;   │ 24900    │ TRANSMIT_ROT_AX_OFFSET_1           │ Rotary-axis angle offset │
+;   │ 24905    │ TRANSMIT_ROT_AX_FRAME_1            │ Rotary-axis frame flag   │
+;   │ 24910    │ TRANSMIT_ROT_SIGN_IS_PLUS_1        │ Sign of rotary axis      │
+;   │ 24911    │ TRANSMIT_POLE_SIDE_FIX_1           │ Working-range at pole    │
+;   │ 24920    │ TRANSMIT_BASE_TOOL_1[0..2]         │ Base-tool offset vector  │
+;   └──────────┴──────────────────────────────────┴──────────────────────────┘
+;
+;   G-codes for TRANSMIT:
+;     TRANSMIT   – activate polar transformation
+;     TRAFOOF    – deactivate transformation
+;     G17 / G18 / G19 – working plane (must match machine geometry)
+;
+;   Runtime variables:
+;     $P_TRAFO   – currently active transformation name
+;
+; PLATFORM:    Siemens SINUMERIK 840D sl / SINUMERIK ONE
+; LANGUAGE:    SINUMERIK NC High-Level Language (HLL)
+; OUTPUT FILE: /user/sinumerik/hmi/log/transmit_kinematics.txt
+;
+; FUNCTION SOURCES:
+;   Every NC language function used here (FILEOPEN, FILEWRITE, FILECLOSE,
+;   TOSTRING, MSG, FOR, IF, DEF, M30, <<) is documented with its exact
+;   Siemens manual reference in:
+;     references/NC_FUNCTIONS_REFERENCE.md
+;   The primary source is the SINUMERIK 840D sl / SINUMERIK ONE
+;   "Programming Manual: Job Planning" (6FC5398-2AP40-0BA3).
+;
+; REVISION HISTORY:
+;   2024-01-01  Initial version
+;   2024-06-01  Corrected all MD numbers from reference manual
+; ============================================================================
+
+; --- Working variables -------------------------------------------------------
+DEF INT         _fd
+DEF INT         _trafoType
+DEF REAL        _rotAxOffset
+DEF INT         _rotAxFrame
+DEF INT         _poleSide
+DEF STRING[120] _line
+DEF INT         _i
+DEF REAL        _rx, _ry, _rz
+
+; --- Output file path --------------------------------------------------------
+DEF STRING[120] _outFile
+_outFile = "/user/sinumerik/hmi/log/transmit_kinematics.txt"
+
+; ============================================================================
+; Main program body
+; ============================================================================
+
+_fd = FILEOPEN(_outFile, 0)           ; 0 = write / create-or-truncate
+IF _fd < 0
+  MSG("ERROR: Cannot create " << _outFile)
+  M30
+ENDIF
+
+; ---- Header -----------------------------------------------------------------
+FILEWRITE(_fd, "============================================================")
+FILEWRITE(_fd, "  SINUMERIK KINEMATICS REPORT — TRANSMIT (POLAR TRANSFORMATION)")
+FILEWRITE(_fd, "  Reference: 840Dsl_md_para_lists_man_1219_en-US")
+FILEWRITE(_fd, "============================================================")
+FILEWRITE(_fd, "")
+FILEWRITE(_fd, "  TRANSMIT maps a programmed Y-axis into a combination of")
+FILEWRITE(_fd, "  the radial (X) axis and the rotary (C) axis of a lathe.")
+FILEWRITE(_fd, "  It enables off-centre milling on a turning machine.")
+FILEWRITE(_fd, "")
+_line = "  NC program   : " << $P_PROG
+FILEWRITE(_fd, _line)
+_line = "  Channel       : " << TOSTRING($AC_CHANNO)
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+
+; ---- Transformation type ---------------------------------------------------
+_trafoType = $MC_TRAFO_TYPE_1
+FILEWRITE(_fd, "--- TRANSFORMATION TYPE (MD24100  $MC_TRAFO_TYPE_1) ---")
+FILEWRITE(_fd, "  TRANSMIT type codes: 256 to 271 (low 4 bits = sub-variant).")
+_line = "  TRAFO_TYPE_1 = " << TOSTRING(_trafoType)
+FILEWRITE(_fd, _line)
+IF (_trafoType >= 256) AND (_trafoType <= 271)
+  FILEWRITE(_fd, "  => TRANSMIT (polar transformation) is configured for this channel.")
+ELSE
+  _line = "  => WARNING: TRAFO_TYPE_1 is not in the TRANSMIT range 256-271."
+  FILEWRITE(_fd, _line)
+  _line = "               Actual type code = " << TOSTRING(_trafoType)
+  FILEWRITE(_fd, _line)
+ENDIF
+FILEWRITE(_fd, "")
+
+; ---- Axis assignment -------------------------------------------------------
+FILEWRITE(_fd, "--- AXIS ASSIGNMENT ---")
+FILEWRITE(_fd, "  Input geometry axes (MD24110  $MC_TRAFO_AXES_IN_1[]) — 0 = unused:")
+FOR _i = 0 TO 2
+  _line = "    TRAFO_AXES_IN_1[" << TOSTRING(_i) << "] = " << TOSTRING($MC_TRAFO_AXES_IN_1[_i])
+  FILEWRITE(_fd, _line)
+ENDFOR
+FILEWRITE(_fd, "")
+FILEWRITE(_fd, "  Geometry-axis → channel-axis assignment")
+FILEWRITE(_fd, "  (MD24120  $MC_TRAFO_GEOAX_ASSIGN_TAB_1[0..2]):")
+FOR _i = 0 TO 2
+  _line = "    geom axis [" << TOSTRING(_i) << "] mapped to channel axis = " << TOSTRING($MC_TRAFO_GEOAX_ASSIGN_TAB_1[_i])
+  FILEWRITE(_fd, _line)
+ENDFOR
+FILEWRITE(_fd, "")
+
+; ---- Rotary axis offset (MD24900) -----------------------------------------
+FILEWRITE(_fd, "--- ROTARY AXIS OFFSET (MD24900  $MC_TRANSMIT_ROT_AX_OFFSET_1) ---")
+FILEWRITE(_fd, "  Angular offset of the rotary axis for TRANSMIT in degrees,")
+FILEWRITE(_fd, "  relative to the neutral position while TRANSMIT is active.")
+FILEWRITE(_fd, "  Allows compensation if the C-axis zero does not coincide with the")
+FILEWRITE(_fd, "  workpiece zero expected by the transformation.")
+_rotAxOffset = $MC_TRANSMIT_ROT_AX_OFFSET_1
+_line = "  TRANSMIT_ROT_AX_OFFSET_1 = " << TOSTRING(_rotAxOffset) << " [deg]"
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+
+; ---- Rotary axis frame flag (MD24905) -------------------------------------
+FILEWRITE(_fd, "--- ROTARY AXIS FRAME FLAG (MD24905  $MC_TRANSMIT_ROT_AX_FRAME_1) ---")
+FILEWRITE(_fd, "  Controls whether the rotary-axis offset is applied via the")
+FILEWRITE(_fd, "  transformation frame ($P_TRAFRAME).")
+_rotAxFrame = $MC_TRANSMIT_ROT_AX_FRAME_1
+_line = "  TRANSMIT_ROT_AX_FRAME_1 = " << TOSTRING(_rotAxFrame)
+FILEWRITE(_fd, _line)
+IF _rotAxFrame == 0
+  FILEWRITE(_fd, "    => 0: Axial rotary-axis offset is NOT considered in the frame.")
+ENDIF
+IF _rotAxFrame == 1
+  FILEWRITE(_fd, "    => 1: Axial rotary-axis offset IS considered in the frame.")
+ENDIF
+IF _rotAxFrame == 2
+  FILEWRITE(_fd, "    => 2: Offset considered until SZS (transformed rotations around C included).")
+ENDIF
+FILEWRITE(_fd, "")
+
+; ---- Sign of rotary axis (MD24910) ----------------------------------------
+FILEWRITE(_fd, "--- ROTARY AXIS SIGN (MD24910  $MC_TRANSMIT_ROT_SIGN_IS_PLUS_1) ---")
+FILEWRITE(_fd, "  Indicates the sign with which the rotary axis is taken into account")
+FILEWRITE(_fd, "  in the TRANSMIT transformation.")
+FILEWRITE(_fd, "  TRUE  = sign is not reversed (traversing direction per MD32100).")
+FILEWRITE(_fd, "  FALSE = sign is reversed.")
+IF $MC_TRANSMIT_ROT_SIGN_IS_PLUS_1 == TRUE
+  FILEWRITE(_fd, "  TRANSMIT_ROT_SIGN_IS_PLUS_1 = TRUE  (standard direction)")
+ELSE
+  FILEWRITE(_fd, "  TRANSMIT_ROT_SIGN_IS_PLUS_1 = FALSE (reversed direction)")
+ENDIF
+FILEWRITE(_fd, "")
+
+; ---- Pole handling (MD24911) -----------------------------------------------
+FILEWRITE(_fd, "--- POLE HANDLING (MD24911  $MC_TRANSMIT_POLE_SIDE_FIX_1) ---")
+FILEWRITE(_fd, "  The pole is the point where the tool centre-line passes through")
+FILEWRITE(_fd, "  the workpiece rotation axis (X = 0).")
+FILEWRITE(_fd, "  Controls restriction of the working area relative to the pole.")
+_poleSide = $MC_TRANSMIT_POLE_SIDE_FIX_1
+_line = "  TRANSMIT_POLE_SIDE_FIX_1 = " << TOSTRING(_poleSide)
+FILEWRITE(_fd, _line)
+IF _poleSide == 0
+  FILEWRITE(_fd, "    => 0: No restriction — tool may cross the pole freely (default).")
+ENDIF
+IF _poleSide == 1
+  FILEWRITE(_fd, "    => 1: Working area of linear axis restricted to positions >= 0.")
+  FILEWRITE(_fd, "           (tool must stay on the positive-X side of the pole)")
+ENDIF
+IF _poleSide == 2
+  FILEWRITE(_fd, "    => 2: Working area of linear axis restricted to positions <= 0.")
+  FILEWRITE(_fd, "           (tool must stay on the negative-X side of the pole)")
+ENDIF
+FILEWRITE(_fd, "")
+
+; ---- Base tool vector (MD24920) -------------------------------------------
+FILEWRITE(_fd, "--- BASE TOOL VECTOR (MD24920  $MC_TRANSMIT_BASE_TOOL_1) ---")
+FILEWRITE(_fd, "  Basic offset of the tool zero for the TRANSMIT transformation.")
+FILEWRITE(_fd, "  Referenced to the geometry axes active when TRANSMIT is active.")
+FILEWRITE(_fd, "  Applied with and without tool-length compensation.")
+FILEWRITE(_fd, "  Programmed length corrections are additive to this base tool.")
+_rx = $MC_TRANSMIT_BASE_TOOL_1[0]
+_ry = $MC_TRANSMIT_BASE_TOOL_1[1]
+_rz = $MC_TRANSMIT_BASE_TOOL_1[2]
+_line = "  TRANSMIT_BASE_TOOL_1 = [" << TOSTRING(_rx) << ", " << TOSTRING(_ry) << ", " << TOSTRING(_rz) << "]  [mm]"
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+
+; ---- Runtime status --------------------------------------------------------
+FILEWRITE(_fd, "--- RUNTIME TRANSFORMATION STATUS ---")
+_line = "  $P_TRAFO (active transformation name) = " << $P_TRAFO
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+
+; ---- G-code reference for TRANSMIT activation ------------------------------
+FILEWRITE(_fd, "--- G-CODE USAGE REFERENCE ---")
+FILEWRITE(_fd, "  Activate   : TRANSMIT  (use in a separate block before motion)")
+FILEWRITE(_fd, "  Deactivate : TRAFOOF   (restores normal axis motion)")
+FILEWRITE(_fd, "  Work plane : G17 (XY), G18 (ZX) or G19 (YZ) — select before TRANSMIT")
+FILEWRITE(_fd, "")
+FILEWRITE(_fd, "  Example:")
+FILEWRITE(_fd, "    T1 D1              ; select milling tool and correction")
+FILEWRITE(_fd, "    SPOS=0             ; position spindle (C-axis) at 0 deg")
+FILEWRITE(_fd, "    G17                ; XY plane for milling")
+FILEWRITE(_fd, "    TRANSMIT           ; activate polar transformation")
+FILEWRITE(_fd, "    G0 X30 Y0 Z5       ; approach in Cartesian coordinates")
+FILEWRITE(_fd, "    G1 Z-5 F200        ; plunge")
+FILEWRITE(_fd, "    G1 Y20 F500        ; mill across workpiece centre-line")
+FILEWRITE(_fd, "    G0 Z50             ; retract")
+FILEWRITE(_fd, "    TRAFOOF            ; deactivate")
+FILEWRITE(_fd, "")
+
+; ---- Footer -----------------------------------------------------------------
+FILEWRITE(_fd, "============================================================")
+FILEWRITE(_fd, "  End of TRANSMIT kinematics report")
+FILEWRITE(_fd, "============================================================")
+
+FILECLOSE(_fd)
+MSG("TRANSMIT kinematics report written to: " << _outFile)
+
+M30
+
+; ============================================================================
+; End of READ_TRANSMIT_KINEMATICS.MPF
+; ============================================================================
+
