@@ -1,0 +1,208 @@
+; ============================================================================
+; READ_TRACYL_KINEMATICS.MPF
+; Program: Read and report TRACYL (cylinder surface transformation) kinematics
+;
+; DESCRIPTION:
+;   TRACYL (Transformation for CYLindrical surface milling) is a SINUMERIK
+;   transformation that "unrolls" the surface of a cylinder so that the
+;   part program can describe grooves, slots and contours as if they were
+;   cut on a flat Cartesian plane.  The CNC re-maps the programmed Y-motion
+;   into rotary (C-axis) motion, keeping the tool tangent to the cylinder
+;   surface.
+;
+;   Conceptually:
+;     Programmed Y   → C-axis angle (arc-length on the cylinder)
+;     Programmed X   → radial depth (diameter offset)
+;     Programmed Z   → axial feed  (along cylinder axis, unchanged)
+;
+;   The key geometric parameter is the cylinder radius R (or diameter),
+;   which controls the Y-to-C scale factor:
+;
+;        C [rad] = Y_programmed / R_cylinder
+;
+;   TRACYL requires that the radial feedrate is defined relative to the
+;   surface of the cylinder, not to the axis of rotation.
+;
+;   Key machine-data parameters (channel MD, read as $MC_xxx):
+;   ┌──────────┬──────────────────────────────────┬──────────────────────────┐
+;   │ MD number│ Variable name                    │ Description              │
+;   ├──────────┼──────────────────────────────────┼──────────────────────────┤
+;   │ 24100    │ $MC_TRAFO_TYPE_1                  │ = 32 for TRACYL          │
+;   │ 24110    │ $MC_TRAFO_AXES_IN_1[0..1]         │ Input geometry axes      │
+;   │ 24120    │ $MC_TRAFO_AXES_OUT_1[0..2]        │ Output machine axes      │
+;   │ 24600    │ $MC_TRACYL_ROT_AX_1               │ Rotary (C) axis index    │
+;   │ 24610    │ $MC_TRACYL_ROT_SIG_1              │ Rotary axis sign         │
+;   │ 24620    │ $MC_TRACYL_ROT_SIGN_IS_PLUS_1     │ Sign convention flag     │
+;   └──────────┴──────────────────────────────────┴──────────────────────────┘
+;
+;   The cylinder radius is NOT stored in machine data; it is supplied by the
+;   part program at runtime using the TRACYL(radius) call syntax.
+;   Example:
+;       TRACYL(25.0)    ; cylinder radius = 25 mm
+;
+;   G-codes for TRACYL:
+;     TRACYL(r)  – activate cylinder surface transformation, r = radius [mm]
+;     TRAFOOF    – deactivate transformation
+;
+;   Runtime variables:
+;     $P_TRAFO        – active transformation name
+;     $P_TRACYL_CYLR  – current cylinder radius as programmed
+;
+; PLATFORM:    Siemens SINUMERIK 840D sl / SINUMERIK ONE  (FW >= 4.5)
+; LANGUAGE:    SINUMERIK NC High-Level Language (HLL)
+; OUTPUT FILE: /user/sinumerik/hmi/log/tracyl_kinematics.txt
+;
+; REVISION HISTORY:
+;   2024-01-01  Initial version
+; ============================================================================
+
+; --- Working variables -------------------------------------------------------
+DEF INT         _fd
+DEF INT         _trafoType
+DEF INT         _rotAxIdx
+DEF INT         _rotSig
+DEF INT         _rotSignPlus
+DEF REAL        _cylRadius
+DEF STRING[120] _line
+DEF INT         _i
+
+; --- Output file path --------------------------------------------------------
+DEF STRING[120] _outFile
+_outFile = "/user/sinumerik/hmi/log/tracyl_kinematics.txt"
+
+; ============================================================================
+; Main program body
+; ============================================================================
+
+_fd = FILEOPEN(_outFile, "w")
+IF _fd < 0
+  MSG("ERROR: Cannot create " << _outFile)
+  M30
+ENDIF
+
+; ---- Header -----------------------------------------------------------------
+FILEWRITE(_fd, "============================================================")
+FILEWRITE(_fd, "  SINUMERIK KINEMATICS REPORT — TRACYL (CYLINDER SURFACE TRANSFORMATION)")
+FILEWRITE(_fd, "============================================================")
+FILEWRITE(_fd, "")
+FILEWRITE(_fd, "  TRACYL unrolls a cylindrical surface so that the part program")
+FILEWRITE(_fd, "  can describe surface contours in flat (Z, Y) coordinates.")
+FILEWRITE(_fd, "  The controller maps programmed Y into C-axis rotation.")
+FILEWRITE(_fd, "")
+_line = "  NC program   : " << $P_PROG
+FILEWRITE(_fd, _line)
+_line = "  Channel       : " << TOSTRING($AC_CHANNO)
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+
+; ---- Transformation type ---------------------------------------------------
+_trafoType = $MC_TRAFO_TYPE_1
+FILEWRITE(_fd, "--- TRANSFORMATION TYPE (MD24100 TRAFO_TYPE_1) ---")
+_line = "  TRAFO_TYPE_1 = " << TOSTRING(_trafoType) << "  (expected: 32 = TRACYL)"
+FILEWRITE(_fd, _line)
+IF _trafoType == 32
+  FILEWRITE(_fd, "  => TRACYL (cylinder surface transformation) is configured.")
+ELSE
+  _line = "  => WARNING: TRAFO_TYPE_1 is NOT 32.  Actual type code = " << TOSTRING(_trafoType)
+  FILEWRITE(_fd, _line)
+ENDIF
+FILEWRITE(_fd, "")
+
+; ---- Axis assignment -------------------------------------------------------
+FILEWRITE(_fd, "--- AXIS ASSIGNMENT ---")
+FILEWRITE(_fd, "  Input geometry axes (MD24110 TRAFO_AXES_IN_1[]):")
+FILEWRITE(_fd, "    [0] = axial axis (Z, along cylinder rotation axis)")
+FILEWRITE(_fd, "    [1] = surface tangent axis (Y, unrolled arc-length)")
+FOR _i = 0 TO 1
+  _line = "    TRAFO_AXES_IN_1[" << TOSTRING(_i) << "] = " << TOSTRING($MC_TRAFO_AXES_IN_1[_i])
+  FILEWRITE(_fd, _line)
+ENDFOR
+FILEWRITE(_fd, "")
+FILEWRITE(_fd, "  Output machine axes (MD24120 TRAFO_AXES_OUT_1[]):")
+FILEWRITE(_fd, "    [0] = physical Z (axial feed)")
+FILEWRITE(_fd, "    [1] = physical X (radial / depth feed)")
+FILEWRITE(_fd, "    [2] = physical C (rotary, cylinder positioning)")
+FOR _i = 0 TO 2
+  _line = "    TRAFO_AXES_OUT_1[" << TOSTRING(_i) << "] = " << TOSTRING($MC_TRAFO_AXES_OUT_1[_i])
+  FILEWRITE(_fd, _line)
+ENDFOR
+FILEWRITE(_fd, "")
+
+; ---- Rotary axis index (MD24600) ------------------------------------------
+FILEWRITE(_fd, "--- ROTARY AXIS CONFIGURATION ---")
+_rotAxIdx = $MC_TRACYL_ROT_AX_1
+_line = "  MD24600 TRACYL_ROT_AX_1          = " << TOSTRING(_rotAxIdx)
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "    Index of the rotary (C) axis used for cylinder rotation.")
+FILEWRITE(_fd, "    The CNC uses this to compute C = Y / R_cylinder.")
+FILEWRITE(_fd, "")
+
+_rotSig = $MC_TRACYL_ROT_SIG_1
+_line = "  MD24610 TRACYL_ROT_SIG_1          = " << TOSTRING(_rotSig)
+FILEWRITE(_fd, _line)
+IF _rotSig == 1
+  FILEWRITE(_fd, "    => +1: positive Y-motion causes counter-clockwise C rotation.")
+ELSE
+  FILEWRITE(_fd, "    => -1: positive Y-motion causes clockwise C rotation (reversed).")
+ENDIF
+FILEWRITE(_fd, "")
+
+_rotSignPlus = $MC_TRACYL_ROT_SIGN_IS_PLUS_1
+_line = "  MD24620 TRACYL_ROT_SIGN_IS_PLUS_1 = " << TOSTRING(_rotSignPlus)
+FILEWRITE(_fd, _line)
+IF _rotSignPlus == 1
+  FILEWRITE(_fd, "    => 1 (TRUE): C increases with positive Y (standard).")
+ELSE
+  FILEWRITE(_fd, "    => 0 (FALSE): C direction is inverted relative to programmed Y.")
+ENDIF
+FILEWRITE(_fd, "")
+
+; ---- Cylinder radius (runtime) --------------------------------------------
+FILEWRITE(_fd, "--- CYLINDER RADIUS (RUNTIME PARAMETER) ---")
+FILEWRITE(_fd, "  The cylinder radius is NOT stored in machine data.")
+FILEWRITE(_fd, "  It is specified in the part program with the TRACYL(r) call.")
+FILEWRITE(_fd, "  During execution, $P_TRACYL_CYLR holds the active radius.")
+_cylRadius = $P_TRACYL_CYLR
+_line = "  $P_TRACYL_CYLR (current active radius) = " << TOSTRING(_cylRadius) << " [mm]"
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+FILEWRITE(_fd, "  The Y-to-C scale factor is:  C [deg] = (Y [mm] / R [mm]) * (180/pi)")
+FILEWRITE(_fd, "  For example, with R = 25 mm:")
+FILEWRITE(_fd, "    Y = 10 mm  =>  C = 10/25 * 180/pi ≈ 22.92 deg")
+FILEWRITE(_fd, "")
+
+; ---- Runtime status --------------------------------------------------------
+FILEWRITE(_fd, "--- RUNTIME TRANSFORMATION STATUS ---")
+_line = "  $P_TRAFO (active transformation name) = " << $P_TRAFO
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+
+; ---- G-code reference ------------------------------------------------------
+FILEWRITE(_fd, "--- G-CODE USAGE REFERENCE ---")
+FILEWRITE(_fd, "  Activate   : TRACYL(radius)  e.g. TRACYL(25.0)  [mm]")
+FILEWRITE(_fd, "  Deactivate : TRAFOOF")
+FILEWRITE(_fd, "  Work plane : G19 (YZ) is typical for cylindrical surface milling")
+FILEWRITE(_fd, "")
+FILEWRITE(_fd, "  Example — helical groove on a 50 mm diameter cylinder:")
+FILEWRITE(_fd, "    T1 D1              ; select groove mill")
+FILEWRITE(_fd, "    G19                ; YZ plane")
+FILEWRITE(_fd, "    TRACYL(25.0)       ; cylinder radius = 25 mm")
+FILEWRITE(_fd, "    G0 Z0 Y0 X-3       ; approach surface (X = -depth from surface)")
+FILEWRITE(_fd, "    G1 Z60 Y40 F200    ; helix on unrolled surface (60 mm axial, 40 mm arc)")
+FILEWRITE(_fd, "    G0 X5              ; retract radially")
+FILEWRITE(_fd, "    TRAFOOF            ; deactivate")
+FILEWRITE(_fd, "")
+
+; ---- Footer -----------------------------------------------------------------
+FILEWRITE(_fd, "============================================================")
+FILEWRITE(_fd, "  End of TRACYL kinematics report")
+FILEWRITE(_fd, "============================================================")
+
+FILECLOSE(_fd)
+MSG("TRACYL kinematics report written to: " << _outFile)
+
+M30
+
+; ============================================================================
+; End of READ_TRACYL_KINEMATICS.MPF
+; ============================================================================

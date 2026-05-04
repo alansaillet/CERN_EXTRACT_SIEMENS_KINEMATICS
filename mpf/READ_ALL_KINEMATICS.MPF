@@ -1,0 +1,235 @@
+; ============================================================================
+; READ_ALL_KINEMATICS.MPF
+; Master program: Detect and report ALL kinematics transformations configured
+;                in this channel.
+;
+; DESCRIPTION:
+;   This program reads the TRAFO_TYPE_x machine data for each transformation
+;   slot (up to 4 per channel) and automatically calls the appropriate
+;   type-specific reader program.  It also writes a master summary file
+;   listing all configured transformations.
+;
+;   Transformation type codes (MD24100 TRAFO_TYPE_1):
+;     0   – No transformation
+;    16   – TRANSMIT  (polar, turning+milling)
+;    24   – TRAORI    head-head 5-axis
+;    32   – TRACYL    (cylinder surface)
+;    40   – TRAORI    table-table 5-axis
+;    56   – TRAORI    head+table (mixed) 5-axis
+;    64   – TRAANG    (inclined axis)
+;
+;   The program will call sub-programs:
+;     01_TRAORI/READ_TRAORI_KINEMATICS.MPF
+;     02_TRANSMIT/READ_TRANSMIT_KINEMATICS.MPF
+;     03_TRACYL/READ_TRACYL_KINEMATICS.MPF
+;     04_TRAANG/READ_TRAANG_KINEMATICS.MPF
+;     05_GENERIC_KINCHAIN/READ_GENERIC_KINCHAIN.MPF
+;
+;   If the Generic Kinematic Chain (GKC) option is not installed, the GKC
+;   reader is skipped (checked via $NK_NUM_ELEMENTS).
+;
+; PLATFORM:    Siemens SINUMERIK 840D sl / SINUMERIK ONE  (FW >= 4.5)
+; LANGUAGE:    SINUMERIK NC High-Level Language (HLL)
+; OUTPUT FILE: /user/sinumerik/hmi/log/all_kinematics_summary.txt
+;
+; HOW TO USE:
+;   1. Copy this program and all sub-directories to the NCK program area.
+;   2. Run READ_ALL_KINEMATICS.MPF from the HMI (MDA or Auto mode).
+;   3. Open the output file at:
+;        /user/sinumerik/hmi/log/all_kinematics_summary.txt
+;      and each individual report in the same folder.
+;
+; REVISION HISTORY:
+;   2024-01-01  Initial version
+; ============================================================================
+
+; --- Working variables -------------------------------------------------------
+DEF INT         _fd               ; master summary file descriptor
+DEF INT         _tSlot            ; transformation slot index  (1..4)
+DEF INT         _tType            ; TRAFO_TYPE of current slot
+DEF INT         _nFound           ; count of configured transformations found
+DEF BOOL        _gkcAvailable     ; TRUE if GKC option variables are accessible
+DEF STRING[120] _line             ; formatted output line
+DEF STRING[80]  _tDesc            ; textual transformation description
+
+; --- Output file path --------------------------------------------------------
+DEF STRING[120] _summaryFile
+_summaryFile = "/user/sinumerik/hmi/log/all_kinematics_summary.txt"
+
+; ============================================================================
+; Main program body
+; ============================================================================
+
+_fd = FILEOPEN(_summaryFile, "w")
+IF _fd < 0
+  MSG("ERROR: Cannot create " << _summaryFile)
+  M30
+ENDIF
+
+; ---- Master header ----------------------------------------------------------
+FILEWRITE(_fd, "============================================================")
+FILEWRITE(_fd, "  SINUMERIK KINEMATICS MASTER SUMMARY")
+FILEWRITE(_fd, "============================================================")
+FILEWRITE(_fd, "")
+_line = "  NC program   : " << $P_PROG
+FILEWRITE(_fd, _line)
+_line = "  Channel       : " << TOSTRING($AC_CHANNO)
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+FILEWRITE(_fd, "  This report scans all 4 transformation slots in this channel")
+FILEWRITE(_fd, "  and lists each configured transformation type.")
+FILEWRITE(_fd, "  Detailed reports are generated in separate files (see below).")
+FILEWRITE(_fd, "")
+FILEWRITE(_fd, "--- TRANSFORMATION SLOT SCAN ---")
+
+_nFound = 0
+
+; ---- Slot 1 -----------------------------------------------------------------
+_tType = $MC_TRAFO_TYPE_1
+_line = "  Slot 1  (MD24100 TRAFO_TYPE_1) = " << TOSTRING(_tType)
+FILEWRITE(_fd, _line)
+IF _tType > 0
+  _nFound = _nFound + 1
+  GOSUB DECODE_TYPE
+  _line = "           => " << _tDesc
+  FILEWRITE(_fd, _line)
+ELSE
+  FILEWRITE(_fd, "           => (not configured)")
+ENDIF
+
+; ---- Slot 2 -----------------------------------------------------------------
+_tType = $MC_TRAFO_TYPE_2
+_line = "  Slot 2  (MD24200 TRAFO_TYPE_2) = " << TOSTRING(_tType)
+FILEWRITE(_fd, _line)
+IF _tType > 0
+  _nFound = _nFound + 1
+  GOSUB DECODE_TYPE
+  _line = "           => " << _tDesc
+  FILEWRITE(_fd, _line)
+ELSE
+  FILEWRITE(_fd, "           => (not configured)")
+ENDIF
+
+; ---- Slot 3 -----------------------------------------------------------------
+_tType = $MC_TRAFO_TYPE_3
+_line = "  Slot 3  (MD24300 TRAFO_TYPE_3) = " << TOSTRING(_tType)
+FILEWRITE(_fd, _line)
+IF _tType > 0
+  _nFound = _nFound + 1
+  GOSUB DECODE_TYPE
+  _line = "           => " << _tDesc
+  FILEWRITE(_fd, _line)
+ELSE
+  FILEWRITE(_fd, "           => (not configured)")
+ENDIF
+
+; ---- Slot 4 -----------------------------------------------------------------
+_tType = $MC_TRAFO_TYPE_4
+_line = "  Slot 4  (MD24400 TRAFO_TYPE_4) = " << TOSTRING(_tType)
+FILEWRITE(_fd, _line)
+IF _tType > 0
+  _nFound = _nFound + 1
+  GOSUB DECODE_TYPE
+  _line = "           => " << _tDesc
+  FILEWRITE(_fd, _line)
+ELSE
+  FILEWRITE(_fd, "           => (not configured)")
+ENDIF
+
+FILEWRITE(_fd, "")
+_line = "  Total configured transformations: " << TOSTRING(_nFound)
+FILEWRITE(_fd, _line)
+FILEWRITE(_fd, "")
+
+; ---- GKC availability check ------------------------------------------------
+FILEWRITE(_fd, "--- GENERIC KINEMATIC CHAIN (GKC) AVAILABILITY ---")
+; Try to read the GKC element count; if the variable exists, GKC is available
+_gkcAvailable = FALSE
+IF $NK_NUM_ELEMENTS >= 0
+  _gkcAvailable = TRUE
+  _line = "  $NK_NUM_ELEMENTS = " << TOSTRING($NK_NUM_ELEMENTS) << "  => GKC option is ACTIVE"
+  FILEWRITE(_fd, _line)
+ELSE
+  FILEWRITE(_fd, "  $NK_NUM_ELEMENTS not accessible => GKC option NOT active or not supported")
+ENDIF
+FILEWRITE(_fd, "")
+
+; ---- Detailed reports location ---------------------------------------------
+FILEWRITE(_fd, "--- DETAILED REPORT FILES ---")
+FILEWRITE(_fd, "  TRAORI   : /user/sinumerik/hmi/log/traori_kinematics.txt")
+FILEWRITE(_fd, "  TRANSMIT : /user/sinumerik/hmi/log/transmit_kinematics.txt")
+FILEWRITE(_fd, "  TRACYL   : /user/sinumerik/hmi/log/tracyl_kinematics.txt")
+FILEWRITE(_fd, "  TRAANG   : /user/sinumerik/hmi/log/traang_kinematics.txt")
+FILEWRITE(_fd, "  GKC      : /user/sinumerik/hmi/log/generic_kinchain.txt")
+FILEWRITE(_fd, "")
+
+FILEWRITE(_fd, "============================================================")
+FILEWRITE(_fd, "  Calling individual kinematics readers ...")
+FILEWRITE(_fd, "============================================================")
+FILECLOSE(_fd)
+
+; ---- Call individual readers based on slot 1 type -------------------------
+_tType = $MC_TRAFO_TYPE_1
+
+IF (_tType == 24) OR (_tType == 40) OR (_tType == 56)
+  MSG("Reading TRAORI kinematics ...")
+  EXTCALL "01_TRAORI/READ_TRAORI_KINEMATICS"
+ENDIF
+
+IF _tType == 16
+  MSG("Reading TRANSMIT kinematics ...")
+  EXTCALL "02_TRANSMIT/READ_TRANSMIT_KINEMATICS"
+ENDIF
+
+IF _tType == 32
+  MSG("Reading TRACYL kinematics ...")
+  EXTCALL "03_TRACYL/READ_TRACYL_KINEMATICS"
+ENDIF
+
+IF _tType == 64
+  MSG("Reading TRAANG kinematics ...")
+  EXTCALL "04_TRAANG/READ_TRAANG_KINEMATICS"
+ENDIF
+
+IF _gkcAvailable == TRUE
+  IF $NK_NUM_ELEMENTS > 0
+    MSG("Reading Generic Kinematic Chain ...")
+    EXTCALL "05_GENERIC_KINCHAIN/READ_GENERIC_KINCHAIN"
+  ENDIF
+ENDIF
+
+MSG("All kinematics reports complete.  See /user/sinumerik/hmi/log/")
+
+M30
+
+; ============================================================================
+; Subroutine DECODE_TYPE
+; Sets _tDesc from _tType
+; ============================================================================
+DECODE_TYPE:
+IF _tType == 16
+  _tDesc = "TRANSMIT  (polar transformation, turning+milling)"
+ENDIF
+IF _tType == 24
+  _tDesc = "TRAORI    (5-axis, HEAD-HEAD: both rotary on tool side)"
+ENDIF
+IF _tType == 32
+  _tDesc = "TRACYL    (cylinder surface transformation)"
+ENDIF
+IF _tType == 40
+  _tDesc = "TRAORI    (5-axis, TABLE-TABLE: both rotary on workpiece side)"
+ENDIF
+IF _tType == 56
+  _tDesc = "TRAORI    (5-axis, MIXED: head rotary + table rotary)"
+ENDIF
+IF _tType == 64
+  _tDesc = "TRAANG    (inclined-axis transformation)"
+ENDIF
+IF (_tType <> 16) AND (_tType <> 24) AND (_tType <> 32) AND (_tType <> 40) AND (_tType <> 56) AND (_tType <> 64)
+  _tDesc = "UNKNOWN transformation type code"
+ENDIF
+RET
+
+; ============================================================================
+; End of READ_ALL_KINEMATICS.MPF
+; ============================================================================
