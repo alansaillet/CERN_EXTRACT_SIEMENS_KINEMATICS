@@ -57,6 +57,14 @@
 ; LANGUAGE:    SINUMERIK NC High-Level Language (HLL)
 ; OUTPUT FILE: /user/sinumerik/hmi/log/traang_kinematics.txt
 ;
+; FUNCTION SOURCES:
+;   Every NC language function used here (FILEOPEN, FILEWRITE, FILECLOSE,
+;   TOSTRING, MSG, FOR, IF, DEF, M30, COS, SIN, TAN, <<) is documented
+;   with its exact Siemens manual reference in:
+;     references/NC_FUNCTIONS_REFERENCE.md
+;   The primary source is the SINUMERIK 840D sl / SINUMERIK ONE
+;   "Programming Manual: Job Planning" (6FC5398-2AP40-0BA3).
+;
 ; REVISION HISTORY:
 ;   2024-01-01  Initial version
 ;   2024-06-01  Corrected all MD numbers from reference manual

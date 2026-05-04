@@ -11,6 +11,14 @@
 ; LANGUAGE:    SINUMERIK NC High-Level Language (HLL)
 ; OUTPUT FILE: /user/sinumerik/hmi/log/kinematics_report.txt
 ;
+; FUNCTION SOURCES:
+;   Every NC language function used here (FILEOPEN, FILEWRITE, FILECLOSE,
+;   TOSTRING, PROC, RET, DEF, <<) is documented with its exact Siemens
+;   manual reference in:
+;     references/NC_FUNCTIONS_REFERENCE.md
+;   The primary source is the SINUMERIK 840D sl / SINUMERIK ONE
+;   "Programming Manual: Job Planning" (6FC5398-2AP40-0BA3).
+;
 ; USAGE EXAMPLE (in a caller MPF):
 ;
 ;   DEF INT    _g_fd                 ; global file descriptor

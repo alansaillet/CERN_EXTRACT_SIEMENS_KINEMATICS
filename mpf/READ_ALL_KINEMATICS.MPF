@@ -44,6 +44,14 @@
 ; LANGUAGE:    SINUMERIK NC High-Level Language (HLL)
 ; OUTPUT FILE: /user/sinumerik/hmi/log/all_kinematics_summary.txt
 ;
+; FUNCTION SOURCES:
+;   Every NC language function used here (FILEOPEN, FILEWRITE, FILECLOSE,
+;   TOSTRING, EXTCALL, GOSUB, MSG, FOR, IF, DEF, M30, <<) is documented
+;   with its exact Siemens manual reference in:
+;     references/NC_FUNCTIONS_REFERENCE.md
+;   The primary source is the SINUMERIK 840D sl / SINUMERIK ONE
+;   "Programming Manual: Job Planning" (6FC5398-2AP40-0BA3).
+;
 ; HOW TO USE:
 ;   1. Copy this program and all sub-directories to the NCK program area.
 ;   2. Run READ_ALL_KINEMATICS.MPF from the HMI (MDA or Auto mode).

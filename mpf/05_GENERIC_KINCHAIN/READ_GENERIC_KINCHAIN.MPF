@@ -58,6 +58,16 @@
 ; LANGUAGE:    SINUMERIK NC High-Level Language (HLL)
 ; OUTPUT FILE: /user/sinumerik/hmi/log/generic_kinchain.txt
 ;
+; FUNCTION SOURCES:
+;   Every NC language function used here (FILEOPEN, FILEWRITE, FILECLOSE,
+;   TOSTRING, MSG, FOR, IF, DEF, M30, <<) is documented with its exact
+;   Siemens manual reference in:
+;     references/NC_FUNCTIONS_REFERENCE.md
+;   The primary source is the SINUMERIK 840D sl / SINUMERIK ONE
+;   "Programming Manual: Job Planning" (6FC5398-2AP40-0BA3).
+;   The $NK_ GKC system variables are documented in the SINUMERIK ONE
+;   "System Variables" manual (6FC5398-8CP40-0BA3).
+;
 ; NOTES:
 ;   1. If $NK_NUM_ELEMENTS returns 0, the GKC option is not active or
 ;      no kinematic elements have been configured in machine data.
