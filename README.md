@@ -4,25 +4,36 @@ A collection of Siemens SINUMERIK NC programs (MPF files) that read the
 kinematic-chain configuration from machine data and system variables and write
 it to a human-readable text report file.
 
+Reference: *SINUMERIK 840D sl / SINUMERIK ONE — Machine Data and Parameters*
+(`840Dsl_md_para_lists_man_1219_en-US`).
+
 ---
 
 ## Background — Kinematics Chain Definition in Siemens SINUMERIK
 
-Siemens SINUMERIK (840D sl / SINUMERIK ONE) supports **five distinct
+Siemens SINUMERIK (840D sl / SINUMERIK ONE) supports **multiple distinct
 transformation types** to define the kinematic relationship between machine
 axes and the programmed Cartesian tool path.  Each method stores its
 geometric parameters in channel machine data (`$MC_` namespace, MD24xxx
 range) and is activated by a dedicated G-code transformation command.
 
-| # | Type | G-code | MD24100 value | Description |
+The transformation type is configured in `MD24100 $MC_TRAFO_TYPE_1` (and
+MD24200/300/400 for slots 2–4).  Bits [3:0] encode an axis-sequence or
+sub-variant; bits [11:4] identify the transformation group:
+
+| # | Type | G-code | MD24100 range | Description |
 |---|------|--------|---------------|-------------|
-| 1 | **TRAORI** – head-head | `TRAORI` | 24 | 5-axis: both rotary axes on tool/spindle side |
-| 2 | **TRAORI** – table-table | `TRAORI` | 40 | 5-axis: both rotary axes on workpiece/table side |
-| 3 | **TRAORI** – mixed | `TRAORI` | 56 | 5-axis: one rotary on tool side, one on table side |
-| 4 | **TRANSMIT** | `TRANSMIT` | 16 | Polar transformation (turning + milling, replaces Y-axis) |
-| 5 | **TRACYL** | `TRACYL(r)` | 32 | Cylinder-surface transformation (unrolls cylinder to plane) |
-| 6 | **TRAANG** | `TRAANG` / `TRAANG(α)` | 64 | Inclined-axis transformation (oblique slide to virtual Cartesian) |
+| 1 | **TRAORI** – head-head | `TRAORI` | 16 – 31 | 5-axis: both rotary axes on tool/spindle side |
+| 2 | **TRAORI** – table-table | `TRAORI` | 32 – 47 | 5-axis: both rotary axes on workpiece/table side |
+| 3 | **TRAORI** – mixed | `TRAORI` | 48 – 63 | 5-axis: one rotary on tool side, one on table side |
+| 4 | **TRANSMIT** | `TRANSMIT` | 256 – 271 | Polar transformation (turning + milling, replaces Y-axis) |
+| 5 | **TRACYL** | `TRACYL(r)` | 512 – 527 | Cylinder-surface transformation (unrolls cylinder to plane) |
+| 6 | **TRAANG** | `TRAANG` / `TRAANG(α)` | 1024 – 1039 | Inclined-axis transformation (oblique slide to virtual Cartesian) |
 | 7 | **Generic Kinematic Chain** | `TRAORI` | n/a (GKC) | SINUMERIK ONE: arbitrary serial chain of FIXED / TRANSLATION / ROTATION elements |
+
+> **Axis-sequence examples for TRAORI** (bits [3:0]): 0=AB, 1=AC, 2=BA,
+> 3=BC, 4=CA, 5=CB.  So `TRAFO_TYPE_1 = 20` means head-head with CA
+> sequence (16 + 4 = 20).
 
 ---
 
@@ -60,22 +71,21 @@ mpf/
 | MD number | Variable (`$MC_`) | Description |
 |-----------|-------------------|-------------|
 | 24100 | `TRAFO_TYPE_1` | Type of transformation 1 (see table above) |
-| 24110 | `TRAFO_AXES_IN_1[0..4]` | Geometry-axis (virtual) input mapping |
-| 24120 | `TRAFO_AXES_OUT_1[0..5]` | Machine-axis (physical) output mapping |
+| 24110 | `TRAFO_AXES_IN_1[0..n]` | Channel-axis input mapping (0 = unused) |
+| 24120 | `TRAFO_GEOAX_ASSIGN_TAB_1[0..2]` | Geometry-axis → channel-axis assignment for active transformation |
 
 ### TRAORI – 5-axis orientation transformation
 
 | MD number | Variable (`$MC_`) | Description |
 |-----------|-------------------|-------------|
-| 24700 | `TRAFO5_PART_OFFSET_1[0..2]` | Workpiece pivot offset X/Y/Z [mm] |
-| 24710 | `TRAFO5_ROT_AX_1_1[0..2]` | 1st rotary axis direction vector (unit) |
-| 24720 | `TRAFO5_ROT_AX_2_1[0..2]` | 2nd rotary axis direction vector (unit) |
-| 24730 | `TRAFO5_BASE_TOOL_1[0..2]` | Base tool direction at zero position (unit) |
-| 24740 | `TRAFO5_ROT_AX_OFFSET_1[0..2]` | Known point on 1st rotary axis [mm] |
-| 24750 | `TRAFO5_ROT_AX_OFFSET_1[3..5]` | Known point on 2nd rotary axis [mm] |
-| 24760 | `TRAFO5_JOINT_OFFSET_1[0..2]` | Arm length between rotary axes [mm] |
-| 24780 | `TRAFO5_NON_POLE_LIMIT_1` | Minimum tilt angle away from pole [deg] |
-| 24782 | `TRAFO5_POLE_LIMIT_1` | Pole singularity handling limit [deg] |
+| 24500 | `TRAFO5_PART_OFFSET_1[0..2]` | Workpiece-carrier offset from reference point [mm] |
+| 24510 | `TRAFO5_ROT_AX_OFFSET_1[0..2]` | Angular offset of orientation rotary axes at neutral position [deg] |
+| 24520 | `TRAFO5_ROT_SIGN_IS_PLUS_1[0..1]` | Sign convention for each orientation axis (TRUE = not reversed) |
+| 24530 | `TRAFO5_NON_POLE_LIMIT_1` | Limit angle for pole-range interpolation change [deg] |
+| 24540 | `TRAFO5_POLE_LIMIT_1` | Max permitted end-angle deviation when switching to pole mode [deg] |
+| 24550 | `TRAFO5_BASE_TOOL_1[0..2]` | Base tool offset at zero position [mm] |
+| 24558 | `TRAFO5_JOINT_OFFSET_PART_1[0..2]` | Table-side joint offset (MIXED kinematics only) [mm] |
+| 24560 | `TRAFO5_JOINT_OFFSET_1[0..2]` | Vector between the two rotary joints [mm] |
 
 Orientation programming modes: `ORIWKS`, `ORIMKS`, `ORIAXES`, `ORIVECT`,
 `ORIEULER`, `ORIRPY`
@@ -84,37 +94,38 @@ Orientation programming modes: `ORIWKS`, `ORIMKS`, `ORIAXES`, `ORIVECT`,
 
 | MD number | Variable (`$MC_`) | Description |
 |-----------|-------------------|-------------|
-| 24520 | `TRANSMIT_ROT_AX_1` | Index of rotary (C) axis |
-| 24530 | `TRANSMIT_ROT_SIG_1` | C-axis rotation sign (+1 / -1) |
-| 24540 | `TRANSMIT_POLE_SIDE_FIX_1` | Pole crossing behaviour (0 = free, ±1 = locked) |
-| 24545 | `TRANSMIT_STRAIGHT_LINE_TL_1` | Straight-line tool-centre compensation flag |
+| 24900 | `TRANSMIT_ROT_AX_OFFSET_1` | Angular offset of rotary axis at neutral position [deg] |
+| 24905 | `TRANSMIT_ROT_AX_FRAME_1` | Whether offset is applied via transformation frame (0/1/2) |
+| 24910 | `TRANSMIT_ROT_SIGN_IS_PLUS_1` | Sign of rotary axis (TRUE = not reversed) |
+| 24911 | `TRANSMIT_POLE_SIDE_FIX_1` | Working area relative to pole (0=free, 1=positive X, 2=negative X) |
+| 24920 | `TRANSMIT_BASE_TOOL_1[0..2]` | Base tool offset [mm] |
 
 ### TRACYL – cylinder surface transformation
 
 | MD number | Variable (`$MC_`) | Description |
 |-----------|-------------------|-------------|
-| 24600 | `TRACYL_ROT_AX_1` | Index of rotary (C) axis |
-| 24610 | `TRACYL_ROT_SIG_1` | C-axis sign (+1 / -1) |
-| 24620 | `TRACYL_ROT_SIGN_IS_PLUS_1` | Sign convention flag |
+| 24800 | `TRACYL_ROT_AX_OFFSET_1` | Angular offset of rotary axis at neutral position [deg] |
+| 24805 | `TRACYL_ROT_AX_FRAME_1` | Whether offset is applied via transformation frame (0/1/2) |
+| 24810 | `TRACYL_ROT_SIGN_IS_PLUS_1` | Sign of rotary axis (TRUE = standard direction) |
+| 24820 | `TRACYL_BASE_TOOL_1[0..2]` | Base tool offset [mm] |
 | — | `$P_TRACYL_CYLR` | Active cylinder radius at runtime [mm] (set in NC with `TRACYL(r)`) |
 
 ### TRAANG – inclined-axis transformation
 
 | MD number | Variable (`$MC_`) | Description |
 |-----------|-------------------|-------------|
-| 24820 | `TRAANG_ANGLE_1` | Mechanical inclination angle α [deg] |
-| 24830 | `TRAANG_PARALLEL_AXIS_1` | Reference axis for angle measurement |
-| 24840 | `TRAANG_AXES_IN_1[0..1]` | Virtual (programmed) axis mapping |
-| 24850 | `TRAANG_AXES_OUT_1[0..1]` | Physical (machine) axis mapping |
+| 24700 | `TRAANG_ANGLE_1` | Mechanical inclination angle α between inclined and reference axis [deg] |
+| 24710 | `TRAANG_BASE_TOOL_1[0..2]` | Base tool offset [mm] |
+| 24720 | `TRAANG_PARALLEL_VELO_RES_1` | Velocity reserve on parallel axis (0 = auto, >0 = fixed fraction 0..1) |
 | — | `$P_TRAANG_ANG` | Active angle at runtime [deg] (overridable via `TRAANG(α)`) |
 
-Kinematic equations:
+Kinematic equations (α = `TRAANG_ANGLE_1`):
 
 ```
-Forward:  Z_phys = Z_virt + Y_virt * sin(alpha)
-          Y_phys = Y_virt / cos(alpha)
-Inverse:  Z_virt = Z_phys - Y_phys * sin(alpha)
-          Y_virt = Y_phys * cos(alpha)
+Forward (virtual → physical):  Z_phys = Z_virt + Y_virt * sin(α)
+                                Y_phys = Y_virt / cos(α)
+Inverse (physical → virtual):  Z_virt = Z_phys - Y_phys * sin(α)
+                                Y_virt = Y_phys * cos(α)
 ```
 
 ### Generic Kinematic Chain (SINUMERIK ONE GKC option)
